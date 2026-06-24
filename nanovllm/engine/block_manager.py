@@ -25,8 +25,9 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, enable_prefix_caching: bool = True):
         self.block_size = block_size
+        self.enable_prefix_caching = enable_prefix_caching
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
@@ -44,7 +45,7 @@ class BlockManager:
         block_id = self.free_block_ids.popleft()
         block = self.blocks[block_id]
         assert block.ref_count == 0
-        if block.hash != -1 and self.hash_to_block_id.get(block.hash) == block_id:
+        if self.enable_prefix_caching and block.hash != -1 and self.hash_to_block_id.get(block.hash) == block_id:
             del self.hash_to_block_id[block.hash]
         block.reset()
         self.used_block_ids.add(block_id)
@@ -55,7 +56,34 @@ class BlockManager:
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
-    def can_allocate(self, seq: Sequence) -> int:
+    def can_allocate(self, seq: Sequence, num_tokens_to_schedule: int = -1) -> int:
+        """Check if we can allocate blocks for a sequence.
+
+        With on-demand allocation (prefix_caching disabled), only requires blocks
+        for the tokens actually being scheduled this step, not the entire sequence.
+        This allows more sequences to start prefilling in parallel.
+
+        Args:
+            seq: The sequence to allocate blocks for.
+            num_tokens_to_schedule: Number of tokens to schedule this step.
+                -1 means allocate blocks for all remaining tokens (backward compatible).
+
+        Returns:
+            -1 if not enough free blocks, otherwise the number of cached blocks
+            (0 when prefix_caching is disabled).
+        """
+        if not self.enable_prefix_caching:
+            # On-demand allocation: only require blocks for tokens being scheduled
+            if num_tokens_to_schedule == -1:
+                num_tokens_to_schedule = seq.num_tokens - seq.num_cached_tokens
+            total_tokens_after = seq.num_cached_tokens + num_tokens_to_schedule
+            total_blocks_needed = (total_tokens_after + self.block_size - 1) // self.block_size
+            num_new_blocks = total_blocks_needed - len(seq.block_table)
+            if num_new_blocks > 0 and len(self.free_block_ids) < num_new_blocks:
+                return -1
+            return 0
+
+        # Prefix caching path: allocate all blocks upfront
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
@@ -72,21 +100,55 @@ class BlockManager:
             return -1
         return num_cached_blocks
 
-    def allocate(self, seq: Sequence, num_cached_blocks: int):
-        assert not seq.block_table
-        h = -1
-        for i in range(num_cached_blocks):
-            token_ids = seq.block(i)
-            h = self.compute_hash(token_ids, h)
-            block_id = self.hash_to_block_id[h]
-            block = self.blocks[block_id]
-            if block_id in self.used_block_ids:
-                block.ref_count += 1
-            else:
-                block.ref_count = 1
-                self.free_block_ids.remove(block_id)
-                self.used_block_ids.add(block_id)
-            seq.block_table.append(block_id)
+    def allocate(self, seq: Sequence, num_cached_blocks: int, num_tokens_to_schedule: int = -1):
+        """Allocate blocks for a sequence.
+
+        With on-demand allocation (prefix_caching disabled), only allocates blocks
+        needed for the tokens being scheduled this step. Supports incremental
+        allocation across multiple prefill steps (chunked prefill).
+
+        Args:
+            seq: The sequence to allocate blocks for.
+            num_cached_blocks: Number of prefix-cached blocks (0 when disabled).
+            num_tokens_to_schedule: Number of tokens to schedule this step.
+                -1 means allocate blocks for all remaining tokens.
+        """
+        if not self.enable_prefix_caching:
+            # On-demand allocation: only allocate blocks for this step's tokens
+            if num_tokens_to_schedule == -1:
+                num_tokens_to_schedule = seq.num_tokens - seq.num_cached_tokens
+            total_tokens_after = seq.num_cached_tokens + num_tokens_to_schedule
+            total_blocks_needed = (total_tokens_after + self.block_size - 1) // self.block_size
+            while len(seq.block_table) < total_blocks_needed:
+                seq.block_table.append(self._allocate_block())
+            return
+
+        # Prefix caching path: must have empty block_table
+        if seq.block_table:
+            # Sequence was partially prefilled with on-demand allocation before
+            # prefix caching was enabled, or chunked prefill left blocks.
+            # Continue allocating incrementally.
+            if num_tokens_to_schedule == -1:
+                num_tokens_to_schedule = seq.num_tokens - seq.num_cached_tokens
+            total_tokens_after = seq.num_cached_tokens + num_tokens_to_schedule
+            total_blocks_needed = (total_tokens_after + self.block_size - 1) // self.block_size
+            while len(seq.block_table) < total_blocks_needed:
+                seq.block_table.append(self._allocate_block())
+            return
+        if num_cached_blocks > 0:
+            h = -1
+            for i in range(num_cached_blocks):
+                token_ids = seq.block(i)
+                h = self.compute_hash(token_ids, h)
+                block_id = self.hash_to_block_id[h]
+                block = self.blocks[block_id]
+                if block_id in self.used_block_ids:
+                    block.ref_count += 1
+                else:
+                    block.ref_count = 1
+                    self.free_block_ids.remove(block_id)
+                    self.used_block_ids.add(block_id)
+                seq.block_table.append(block_id)
         for i in range(num_cached_blocks, seq.num_blocks):
             seq.block_table.append(self._allocate_block())
         seq.num_cached_tokens = num_cached_blocks * self.block_size
@@ -108,6 +170,8 @@ class BlockManager:
             seq.block_table.append(self._allocate_block())
 
     def hash_blocks(self, seq: Sequence):
+        if not self.enable_prefix_caching:
+            return
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
         if start == end: return

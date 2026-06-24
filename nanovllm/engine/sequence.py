@@ -1,6 +1,7 @@
 from copy import copy
 from enum import Enum, auto
 from itertools import count
+from time import perf_counter
 
 from nanovllm.sampling_params import SamplingParams
 
@@ -29,6 +30,12 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self._num_blocks = (self.num_tokens + self.block_size - 1) // self.block_size
+        self._last_block_num_tokens = self.num_tokens - (self._num_blocks - 1) * self.block_size
+        # Timing
+        self.arrival_time = perf_counter()
+        self.first_token_time: float | None = None
+        self.completion_time: float | None = None
 
     def __len__(self):
         return self.num_tokens
@@ -71,13 +78,16 @@ class Sequence:
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state, self.arrival_time, self.first_token_time, self.completion_time)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state, self.arrival_time, self.first_token_time, self.completion_time = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]
         else:
             self.token_ids = []
             self.last_token = last_state
+        # Reconstruct cached block metadata
+        self._num_blocks = (self.num_tokens + self.block_size - 1) // self.block_size
+        self._last_block_num_tokens = self.num_tokens - (self._num_blocks - 1) * self.block_size

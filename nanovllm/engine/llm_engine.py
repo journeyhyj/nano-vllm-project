@@ -51,7 +51,7 @@ class LLMEngine:
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [(seq.seq_id, seq.completion_token_ids, seq) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
 
     def is_finished(self):
@@ -69,6 +69,8 @@ class LLMEngine:
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
+        ttfts = {}
+        latencies = {}
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
@@ -81,10 +83,15 @@ class LLMEngine:
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",
             })
-            for seq_id, token_ids in output:
+            for seq_id, token_ids, seq in output:
                 outputs[seq_id] = token_ids
+                ttfts[seq_id] = seq.first_token_time - seq.arrival_time if seq.first_token_time else None
+                latencies[seq_id] = seq.completion_time - seq.arrival_time if seq.completion_time else None
                 pbar.update(1)
         pbar.close()
-        outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
+        sorted_ids = sorted(outputs.keys())
+        outputs = [outputs[seq_id] for seq_id in sorted_ids]
+        ttfts = [ttfts[seq_id] for seq_id in sorted_ids]
+        latencies = [latencies[seq_id] for seq_id in sorted_ids]
+        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids, "ttft": ttft, "latency": latency} for token_ids, ttft, latency in zip(outputs, ttfts, latencies)]
         return outputs
