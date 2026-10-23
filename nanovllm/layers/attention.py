@@ -68,8 +68,9 @@ class Attention(nn.Module):
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
-        else:    # decode
-            o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
+        else:    # decode; query_len > 1 when verifying speculative tokens
+            o = flash_attn_with_kvcache(q.view(-1, context.query_len, self.num_heads, self.head_dim), k_cache, v_cache,
                                         cache_seqlens=context.context_lens, block_table=context.block_tables, 
                                         softmax_scale=self.scale, causal=True)
+            o = o.view(-1, self.num_heads, self.head_dim)
         return o

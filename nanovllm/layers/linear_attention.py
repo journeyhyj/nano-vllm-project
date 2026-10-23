@@ -18,18 +18,20 @@ def causal_conv1d_kernel(
     has_initial_state_ptr,
     C,
     W: tl.constexpr,
-    IS_DECODE: tl.constexpr,
+    DECODE_LEN: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_C: tl.constexpr,
 ):
     i_c, i_t, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    if IS_DECODE:
-        bos = i_n
-        eos = i_n + 1
+    if DECODE_LEN > 0:    # every sequence has DECODE_LEN tokens; its current state is in the last slot of its group
+        bos = i_n * DECODE_LEN
+        eos = bos + DECODE_LEN
+        slot = tl.load(state_slots_ptr + eos - 1).to(tl.int64)
         has_initial_state = True
     else:
         bos = tl.load(cu_seqlens_ptr + i_n)
         eos = tl.load(cu_seqlens_ptr + i_n + 1)
+        slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
         has_initial_state = tl.load(has_initial_state_ptr + i_n) != 0
     t0 = bos + i_t * BLOCK_T
     if t0 >= eos:
@@ -38,7 +40,6 @@ def causal_conv1d_kernel(
     offs_c = i_c * BLOCK_C + tl.arange(0, BLOCK_C)
     mask_t = offs_t < eos
     mask_c = offs_c < C
-    slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
     state_ptr = conv_state_ptr + slot * (W - 1) * C
     acc = tl.zeros((BLOCK_T, BLOCK_C), dtype=tl.float32)
     for j in tl.static_range(W):
@@ -75,19 +76,13 @@ def conv_state_update_kernel(
     state_slots_ptr,
     has_initial_state_ptr,
     C,
-    IS_DECODE: tl.constexpr,
     BLOCK_C: tl.constexpr,
 ):
     # keep the last 3 inputs of every sequence (kernel size 4) for its next chunk / decode step
     i_c, i_n = tl.program_id(0), tl.program_id(1)
-    if IS_DECODE:
-        bos = i_n
-        eos = i_n + 1
-        has_initial_state = True
-    else:
-        bos = tl.load(cu_seqlens_ptr + i_n)
-        eos = tl.load(cu_seqlens_ptr + i_n + 1)
-        has_initial_state = tl.load(has_initial_state_ptr + i_n) != 0
+    bos = tl.load(cu_seqlens_ptr + i_n)
+    eos = tl.load(cu_seqlens_ptr + i_n + 1)
+    has_initial_state = tl.load(has_initial_state_ptr + i_n) != 0
     offs_c = i_c * BLOCK_C + tl.arange(0, BLOCK_C)
     mask_c = offs_c < C
     slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
@@ -99,6 +94,42 @@ def conv_state_update_kernel(
     tl.store(state_ptr + offs_c, s0, mask=mask_c)
     tl.store(state_ptr + C + offs_c, s1, mask=mask_c)
     tl.store(state_ptr + 2 * C + offs_c, s2, mask=mask_c)
+
+
+@triton.jit
+def _window_input(x_ptr, x_stride, offs_c, mask_c, bos, p: tl.constexpr, old1, old2):
+    if p >= 0:
+        v = tl.load(x_ptr + (bos + p) * x_stride + offs_c, mask=mask_c, other=0.0)
+    elif p == -1:
+        v = old2
+    else:
+        v = old1
+    return v
+
+
+@triton.jit
+def conv_state_update_decode_kernel(
+    x_ptr,
+    x_stride,
+    conv_state_ptr,
+    state_slots_ptr,
+    C,
+    DECODE_LEN: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+):
+    # after decoded token j, write the conv state (last 3 inputs) into slot j of the sequence's group
+    i_c, i_n = tl.program_id(0), tl.program_id(1)
+    bos = i_n * DECODE_LEN
+    offs_c = i_c * BLOCK_C + tl.arange(0, BLOCK_C)
+    mask_c = offs_c < C
+    cur = tl.load(state_slots_ptr + bos + DECODE_LEN - 1).to(tl.int64)
+    old1 = tl.load(conv_state_ptr + cur * 3 * C + C + offs_c, mask=mask_c, other=0.0)
+    old2 = tl.load(conv_state_ptr + cur * 3 * C + 2 * C + offs_c, mask=mask_c, other=0.0)
+    for j in tl.static_range(DECODE_LEN):
+        state_ptr = conv_state_ptr + tl.load(state_slots_ptr + bos + j).to(tl.int64) * 3 * C
+        tl.store(state_ptr + offs_c, _window_input(x_ptr, x_stride, offs_c, mask_c, bos, j - 2, old1, old2), mask=mask_c)
+        tl.store(state_ptr + C + offs_c, _window_input(x_ptr, x_stride, offs_c, mask_c, bos, j - 1, old1, old2), mask=mask_c)
+        tl.store(state_ptr + 2 * C + offs_c, _window_input(x_ptr, x_stride, offs_c, mask_c, bos, j, old1, old2), mask=mask_c)
 
 
 @triton.jit
@@ -118,20 +149,21 @@ def gated_delta_rule_kernel(
     K: tl.constexpr,
     V: tl.constexpr,
     BV: tl.constexpr,
-    IS_DECODE: tl.constexpr,
+    DECODE_LEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // Hv, i_nh % Hv
     i_hk = i_h // (Hv // Hk)    # grouped value heads share one q/k head
-    if IS_DECODE:
-        bos = i_n
-        eos = i_n + 1
+    if DECODE_LEN > 0:
+        bos = i_n * DECODE_LEN
+        eos = bos + DECODE_LEN
+        slot = tl.load(state_slots_ptr + eos - 1).to(tl.int64)
         has_initial_state = True
     else:
         bos = tl.load(cu_seqlens_ptr + i_n)
         eos = tl.load(cu_seqlens_ptr + i_n + 1)
+        slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
         has_initial_state = tl.load(has_initial_state_ptr + i_n) != 0
-    slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
     offs_k = tl.arange(0, K)
     offs_v = i_v * BV + tl.arange(0, BV)
     p_state = ssm_state_ptr + (slot * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :]
@@ -152,7 +184,11 @@ def gated_delta_rule_kernel(
         S = S + k[:, None] * v[None, :]
         o = tl.sum(S * q[:, None], axis=0)
         tl.store(o_ptr + (t * Hv + i_h) * V + offs_v, o.to(o_ptr.dtype.element_ty))
-    tl.store(p_state, S)
+        if DECODE_LEN > 0:    # keep the state after every token so rejected speculative tokens can be rolled back
+            slot_t = tl.load(state_slots_ptr + t).to(tl.int64)
+            tl.store(ssm_state_ptr + (slot_t * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :], S)
+    if DECODE_LEN == 0:
+        tl.store(p_state, S)
 
 
 class LinearAttention(nn.Module):
@@ -186,23 +222,28 @@ class LinearAttention(nn.Module):
             conv_state = mixed_qkv.new_zeros(n, self.conv_kernel_size - 1, self.conv_dim)
             ssm_state = torch.zeros(n, self.num_v_heads, self.head_k_dim, self.head_v_dim,
                                     dtype=torch.float32, device=mixed_qkv.device)
-        is_decode = not context.is_prefill
-        num_seqs = context.state_slots.numel()
+        # decode: every sequence has query_len tokens and a group of query_len state slots
+        decode_len = 0 if context.is_prefill else context.query_len
+        num_seqs = context.state_slots.numel() // max(decode_len, 1)
         T, C = mixed_qkv.shape
         x = torch.empty(T, C, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
         BLOCK_C = 256
-        BLOCK_T = 2 if is_decode else 16
-        max_seqlen = 1 if is_decode else context.max_seqlen_q
+        BLOCK_T = triton.next_power_of_2(decode_len) if decode_len else 16
+        max_seqlen = decode_len or context.max_seqlen_q
         conv_args = (context.cu_seqlens_q, context.state_slots, context.has_initial_state, C)
         causal_conv1d_kernel[(triton.cdiv(C, BLOCK_C), triton.cdiv(max_seqlen, BLOCK_T), num_seqs)](
             mixed_qkv, mixed_qkv.stride(0), conv_weight, x, conv_state, *conv_args,
-            W=self.conv_kernel_size, IS_DECODE=is_decode, BLOCK_T=BLOCK_T, BLOCK_C=BLOCK_C)
-        conv_state_update_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
-            mixed_qkv, mixed_qkv.stride(0), conv_state, *conv_args, IS_DECODE=is_decode, BLOCK_C=BLOCK_C)
+            W=self.conv_kernel_size, DECODE_LEN=decode_len, BLOCK_T=BLOCK_T, BLOCK_C=BLOCK_C)
+        if decode_len:
+            conv_state_update_decode_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
+                mixed_qkv, mixed_qkv.stride(0), conv_state, context.state_slots, C, DECODE_LEN=decode_len, BLOCK_C=BLOCK_C)
+        else:
+            conv_state_update_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
+                mixed_qkv, mixed_qkv.stride(0), conv_state, *conv_args, BLOCK_C=BLOCK_C)
         o = torch.empty(T, self.num_v_heads, self.head_v_dim, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
         BV = 32
         gated_delta_rule_kernel[(self.head_v_dim // BV, num_seqs * self.num_v_heads)](
             x, x.stride(0), g, beta, o, ssm_state,
             context.cu_seqlens_q, context.state_slots, context.has_initial_state, self.scale,
-            Hk=self.num_k_heads, Hv=self.num_v_heads, K=self.head_k_dim, V=self.head_v_dim, BV=BV, IS_DECODE=is_decode)
+            Hk=self.num_k_heads, Hv=self.num_v_heads, K=self.head_k_dim, V=self.head_v_dim, BV=BV, DECODE_LEN=decode_len)
         return o
