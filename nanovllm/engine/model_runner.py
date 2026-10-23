@@ -7,6 +7,8 @@ from multiprocessing.shared_memory import SharedMemory
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
+from nanovllm.layers.linear_attention import LinearAttention
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -28,8 +30,10 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        model_cls = {"Qwen3_5ForConditionalGeneration": Qwen3_5ForCausalLM}.get(hf_config.architectures[0], Qwen3ForCausalLM)
+        self.model = model_cls(hf_config)
         load_model(self.model, config.model)
+        self.linear_attn_layers = [m for m in self.model.modules() if isinstance(m, LinearAttention)]
         self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -95,8 +99,9 @@ class ModelRunner:
         seq_len = min(max_num_batched_tokens, max_model_len)
         num_seqs = min(max_num_batched_tokens // seq_len, self.config.max_num_seqs)
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
-        for seq in seqs:
+        for i, seq in enumerate(seqs):
             seq.num_scheduled_tokens = seq_len
+            seq.state_slot = i
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -107,18 +112,36 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        available = int(total * config.gpu_memory_utilization - used - peak + current)
+        if self.linear_attn_layers:
+            available -= self.allocate_state_cache(available)
+        attn_layers = [m for m in self.model.modules() if hasattr(m, "k_cache") and hasattr(m, "v_cache")]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        block_bytes = 2 * len(attn_layers) * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
+        config.num_kvcache_blocks = available // block_bytes
         assert config.num_kvcache_blocks > 0
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
-        layer_id = 0
-        for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id]
-                module.v_cache = self.kv_cache[1, layer_id]
-                layer_id += 1
+        self.kv_cache = torch.empty(2, len(attn_layers), config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        for layer_id, module in enumerate(attn_layers):
+            module.k_cache = self.kv_cache[0, layer_id]
+            module.v_cache = self.kv_cache[1, layer_id]
+
+    def allocate_state_cache(self, available: int) -> int:
+        # one recurrent-state slot per running sequence in every linear-attention layer, using at most
+        # half of the budget; the extra slot (index num_state_slots) absorbs CUDA-graph padding
+        config = self.config
+        slot_bytes = sum(
+            (m.conv_kernel_size - 1) * m.conv_dim * config.hf_config.dtype.itemsize
+            + m.num_v_heads * m.head_k_dim * m.head_v_dim * 4
+            for m in self.linear_attn_layers
+        )
+        num_slots = min(config.max_num_seqs, available // 2 // slot_bytes - 1)
+        assert num_slots > 0
+        config.max_num_seqs = config.num_state_slots = num_slots
+        for m in self.linear_attn_layers:
+            m.conv_state = torch.zeros(num_slots + 1, m.conv_kernel_size - 1, m.conv_dim)
+            m.ssm_state = torch.zeros(num_slots + 1, m.num_v_heads, m.head_k_dim, m.head_v_dim, dtype=torch.float32)
+        return (num_slots + 1) * slot_bytes
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
@@ -166,7 +189,13 @@ class ModelRunner:
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        state_slots = has_initial_state = None
+        if self.linear_attn_layers:
+            state_slots = self.prepare_state_slots(seqs)
+            # with prefix caching off, cached tokens only exist after an earlier chunk of this sequence
+            has_initial_state = [seq.num_cached_tokens > 0 for seq in seqs]
+            has_initial_state = torch.tensor(has_initial_state, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, state_slots, has_initial_state)
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -184,8 +213,13 @@ class ModelRunner:
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        state_slots = self.prepare_state_slots(seqs) if self.linear_attn_layers else None
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, state_slots=state_slots)
         return input_ids, positions
+
+    def prepare_state_slots(self, seqs: list[Sequence]):
+        state_slots = [seq.state_slot for seq in seqs]
+        return torch.tensor(state_slots, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
 
     def prepare_sample(self, seqs: list[Sequence]):
         temperatures = [seq.temperature for seq in seqs]
@@ -208,6 +242,9 @@ class ModelRunner:
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            if context.state_slots is not None:
+                graph_vars["state_slots"].fill_(self.config.num_state_slots)
+                graph_vars["state_slots"][:bs] = context.state_slots
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
@@ -230,6 +267,8 @@ class ModelRunner:
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+        # padded batch entries point at the spare state slot so they never touch a live sequence
+        state_slots = torch.full((max_bs,), config.num_state_slots, dtype=torch.int32) if self.linear_attn_layers else None
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
         self.graph_bs = [bs for bs in [1, 2, 4, 8] if bs < max_bs] + list(range(16, max_bs, 16)) + [max_bs]
         self.graphs = {}
@@ -237,7 +276,8 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs],
+                        state_slots=state_slots[:bs] if state_slots is not None else None)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
@@ -253,5 +293,6 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
+            state_slots=state_slots,
             outputs=outputs,
         )

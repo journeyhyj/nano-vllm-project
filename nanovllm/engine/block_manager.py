@@ -25,12 +25,17 @@ class Block:
 
 class BlockManager:
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, num_state_slots: int = 0):
         self.block_size = block_size
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
+        # Hybrid models also keep one recurrent-state slot per sequence. Cached KV blocks
+        # cannot rebuild that state, so prefix caching is off for them.
+        self.free_state_slots: deque[int] = deque(range(num_state_slots))
+        self.use_state_slots = num_state_slots > 0
+        self.enable_prefix_caching = not self.use_state_slots
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -56,10 +61,13 @@ class BlockManager:
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> int:
+        if self.use_state_slots and not self.free_state_slots:
+            return -1
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
-        for i in range(seq.num_blocks - 1):
+        num_blocks_to_match = seq.num_blocks - 1 if self.enable_prefix_caching else 0
+        for i in range(num_blocks_to_match):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h)
             block_id = self.hash_to_block_id.get(h, -1)
@@ -90,6 +98,8 @@ class BlockManager:
         for i in range(num_cached_blocks, seq.num_blocks):
             seq.block_table.append(self._allocate_block())
         seq.num_cached_tokens = num_cached_blocks * self.block_size
+        if self.use_state_slots:
+            seq.state_slot = self.free_state_slots.popleft()
 
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
@@ -99,6 +109,9 @@ class BlockManager:
                 self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()
+        if seq.state_slot != -1:
+            self.free_state_slots.append(seq.state_slot)
+            seq.state_slot = -1
 
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
@@ -108,6 +121,8 @@ class BlockManager:
             seq.block_table.append(self._allocate_block())
 
     def hash_blocks(self, seq: Sequence):
+        if not self.enable_prefix_caching:
+            return
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
         if start == end: return
