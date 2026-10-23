@@ -6,7 +6,7 @@ import torch.distributed as dist
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.linear_attention import LinearAttention
 from nanovllm.layers.layernorm import ZeroCenteredRMSNorm, GatedRMSNorm
-from nanovllm.layers.linear import MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.linear import ReplicatedLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.models.qwen3 import Qwen3MLP
@@ -193,6 +193,33 @@ class Qwen3_5Model(nn.Module):
         return hidden_states
 
 
+class Qwen3_5MultiTokenPredictor(nn.Module):
+    """MTP head: predicts the token after next from the target hidden state at position p
+    and the embedding of the token at p + 1."""
+
+    def __init__(
+        self,
+        config,
+    ) -> None:
+        super().__init__()
+        self.pre_fc_norm_embedding = ZeroCenteredRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_hidden = ZeroCenteredRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.fc = ReplicatedLinear(2 * config.hidden_size, config.hidden_size, bias=False)
+        self.layers = nn.ModuleList([Qwen3_5DecoderLayer(config, "full_attention")])
+        self.norm = ZeroCenteredRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        x = torch.cat([self.pre_fc_norm_embedding(inputs_embeds), self.pre_fc_norm_hidden(hidden_states)], dim=-1)
+        x, residual = self.layers[0](positions, self.fc(x), None)
+        x, _ = self.norm(x, residual)
+        return x
+
+
 class Qwen3_5ForCausalLM(nn.Module):
     packed_modules_mapping = {
         "q_proj": ("qkv_proj", 0),
@@ -206,14 +233,17 @@ class Qwen3_5ForCausalLM(nn.Module):
         "in_proj_a": ("in_proj_ba", 1),
     }
     weight_prefix_mapping = {"model.language_model.": "model."}
-    skip_weight_prefixes = ("model.visual.", "mtp.")    # text only; the MTP head is unused for now
 
     def __init__(
         self,
         config,
+        use_mtp: bool = False,
     ) -> None:
         super().__init__()
         self.model = Qwen3_5Model(config)
+        if use_mtp:
+            self.mtp = Qwen3_5MultiTokenPredictor(config)
+        self.skip_weight_prefixes = ("model.visual.",) if use_mtp else ("model.visual.", "mtp.")    # text only
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
@@ -224,6 +254,14 @@ class Qwen3_5ForCausalLM(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         return self.model(input_ids, positions)
+
+    def mtp_forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.mtp(self.model.embed_tokens(input_ids), positions, hidden_states)
 
     def compute_logits(
         self,
