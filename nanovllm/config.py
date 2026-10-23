@@ -16,12 +16,14 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
-    num_state_slots: int = 0
+    num_state_groups: int = 0
+    num_speculative_tokens: int = 0
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
+        assert self.num_speculative_tokens in (0, 1), "only one MTP draft token per step is supported"
         self.hf_config = AutoConfig.from_pretrained(self.model)
         if hasattr(self.hf_config, "text_config"):    # vision-language checkpoints (e.g. Qwen3.5) nest the LLM config
             text_config = self.hf_config.text_config

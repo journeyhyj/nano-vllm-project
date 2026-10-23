@@ -12,7 +12,9 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.num_state_slots)
+        self.num_speculative_tokens = config.num_speculative_tokens
+        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size,
+                                          config.num_state_groups, 1 + config.num_speculative_tokens)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -54,19 +56,20 @@ class Scheduler:
         if scheduled_seqs:
             return scheduled_seqs, True
 
-        # decode
+        # decode: the last token plus num_speculative_tokens draft tokens per sequence
+        num_tokens = 1 + self.num_speculative_tokens
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.running.popleft()
-            while not self.block_manager.can_append(seq):
+            while not self.block_manager.can_append(seq, num_tokens):
                 if self.running:
                     self.preempt(self.running.pop())
                 else:
                     self.preempt(seq)
                     break
             else:
-                seq.num_scheduled_tokens = 1
+                seq.num_scheduled_tokens = num_tokens
                 seq.is_prefill = False
-                self.block_manager.may_append(seq)
+                self.block_manager.may_append(seq, num_tokens)
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
@@ -78,15 +81,30 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
-        for seq, token_id in zip(seqs, token_ids):
+    def postprocess(self, seqs: list[Sequence], token_ids: list[int] | list[list[int]], is_prefill: bool,
+                    draft_tokens: list[int] | None = None):
+        for i, seq in enumerate(seqs):
             self.block_manager.hash_blocks(seq)
-            seq.num_cached_tokens += seq.num_scheduled_tokens
+            if draft_tokens is not None and not is_prefill:
+                # verified [last token, draft]: accepted drafts plus one corrected/bonus token come back,
+                # and KV / recurrent state stay valid up to the last accepted draft
+                new_tokens = token_ids[i]
+                num_accepted = len(new_tokens) - 1
+                seq.num_cached_tokens += 1 + num_accepted
+                slots = seq.state_slots
+                seq.state_slots = slots[:num_accepted] + slots[num_accepted + 1:] + [slots[num_accepted]]
+            else:
+                new_tokens = token_ids[i] if draft_tokens is not None else [token_ids[i]]
+                seq.num_cached_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 continue
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
-                seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
-                self.running.remove(seq)
+            if draft_tokens is not None:
+                seq.draft_token = draft_tokens[i]
+            for token_id in new_tokens:
+                seq.append_token(token_id)
+                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+                    seq.status = SequenceStatus.FINISHED
+                    self.block_manager.deallocate(seq)
+                    self.running.remove(seq)
+                    break

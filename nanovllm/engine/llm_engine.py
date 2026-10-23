@@ -31,6 +31,7 @@ class LLMEngine:
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
+        self.speculative = config.num_speculative_tokens > 0
         self.scheduler = Scheduler(config)
         atexit.register(self.exit)
 
@@ -50,7 +51,12 @@ class LLMEngine:
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        draft_tokens = None
+        if self.speculative:    # run returns (accepted tokens per sequence, next draft per sequence)
+            token_ids, draft_tokens = token_ids
+            if not is_prefill:
+                num_tokens = -sum(len(t) for t in token_ids)
+        self.scheduler.postprocess(seqs, token_ids, is_prefill, draft_tokens)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
 
