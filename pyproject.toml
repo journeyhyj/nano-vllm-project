@@ -16,6 +16,7 @@ dependencies = [
     "triton>=3.0.0",
     "transformers>=4.51.0",
     "flash-attn",
+    "fla-core>=0.4.2,<0.5",    # Gated DeltaNet prefill; 0.5+ requires torch>=2.7 and triton>=3.3
     "xxhash",
 ]
 

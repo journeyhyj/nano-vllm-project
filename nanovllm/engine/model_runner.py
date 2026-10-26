@@ -9,7 +9,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.models.qwen3_5 import Qwen3_5ForCausalLM
-from nanovllm.layers.linear_attention import LinearAttention
+from nanovllm.layers.linear_attention import LinearAttention, plan_fla_windows
 from nanovllm.layers.sampler import Sampler, compute_probs, sample_from_probs, rejection_sample
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -209,18 +209,20 @@ class ModelRunner:
                 slot_mapping.extend(range(slot_start, slot_end))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        state_slots = has_initial_state = None
+        state_slots = has_initial_state = fla_windows = None
         if self.linear_attn_layers:
             state_slots = self.prepare_state_slots(seqs, is_prefill=True)
             # with prefix caching off, cached tokens only exist after an earlier chunk of this sequence
             has_initial_state = [seq.num_cached_tokens > 0 for seq in seqs]
             has_initial_state = torch.tensor(has_initial_state, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, state_slots, has_initial_state)
+            fla_windows = plan_fla_windows(cu_seqlens_q)    # shared by all linear attention layers of this step
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, state_slots,
+                    has_initial_state, fla_windows=fla_windows)
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):

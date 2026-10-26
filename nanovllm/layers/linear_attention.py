@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import triton
 import triton.language as tl
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
 from nanovllm.utils.context import get_context
 
@@ -133,16 +134,14 @@ def conv_state_update_decode_kernel(
 
 
 @triton.jit
-def gated_delta_rule_kernel(
+def gated_delta_rule_decode_kernel(
     x_ptr,
     x_stride,
     g_ptr,
     beta_ptr,
     o_ptr,
     ssm_state_ptr,
-    cu_seqlens_ptr,
     state_slots_ptr,
-    has_initial_state_ptr,
     scale,
     Hk: tl.constexpr,
     Hv: tl.constexpr,
@@ -151,26 +150,16 @@ def gated_delta_rule_kernel(
     BV: tl.constexpr,
     DECODE_LEN: tl.constexpr,
 ):
+    # every sequence has DECODE_LEN tokens and a group of DECODE_LEN slots; its current state is in the last slot
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // Hv, i_nh % Hv
     i_hk = i_h // (Hv // Hk)    # grouped value heads share one q/k head
-    if DECODE_LEN > 0:
-        bos = i_n * DECODE_LEN
-        eos = bos + DECODE_LEN
-        slot = tl.load(state_slots_ptr + eos - 1).to(tl.int64)
-        has_initial_state = True
-    else:
-        bos = tl.load(cu_seqlens_ptr + i_n)
-        eos = tl.load(cu_seqlens_ptr + i_n + 1)
-        slot = tl.load(state_slots_ptr + i_n).to(tl.int64)
-        has_initial_state = tl.load(has_initial_state_ptr + i_n) != 0
+    bos = i_n * DECODE_LEN
+    slot = tl.load(state_slots_ptr + bos + DECODE_LEN - 1).to(tl.int64)
     offs_k = tl.arange(0, K)
     offs_v = i_v * BV + tl.arange(0, BV)
-    p_state = ssm_state_ptr + (slot * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :]
-    S = tl.zeros((K, BV), dtype=tl.float32)
-    if has_initial_state:
-        S = tl.load(p_state)
-    for t in range(bos, eos):
+    S = tl.load(ssm_state_ptr + (slot * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :])
+    for t in range(bos, bos + DECODE_LEN):
         # x row layout: [q (Hk*K) | k (Hk*K) | v (Hv*V)]
         q = tl.load(x_ptr + t * x_stride + i_hk * K + offs_k).to(tl.float32)
         k = tl.load(x_ptr + t * x_stride + (Hk + i_hk) * K + offs_k).to(tl.float32)
@@ -184,16 +173,15 @@ def gated_delta_rule_kernel(
         S = S + k[:, None] * v[None, :]
         o = tl.sum(S * q[:, None], axis=0)
         tl.store(o_ptr + (t * Hv + i_h) * V + offs_v, o.to(o_ptr.dtype.element_ty))
-        if DECODE_LEN > 0:    # keep the state after every token so rejected speculative tokens can be rolled back
-            slot_t = tl.load(state_slots_ptr + t).to(tl.int64)
-            tl.store(ssm_state_ptr + (slot_t * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :], S)
-    if DECODE_LEN == 0:
-        tl.store(p_state, S)
+        # keep the state after every token so rejected speculative tokens can be rolled back
+        slot_t = tl.load(state_slots_ptr + t).to(tl.int64)
+        tl.store(ssm_state_ptr + (slot_t * Hv + i_h) * K * V + offs_k[:, None] * V + offs_v[None, :], S)
 
 
 class LinearAttention(nn.Module):
     """Causal conv1d + gated delta rule of Gated DeltaNet. Each sequence keeps its
-    recurrent state in conv_state / ssm_state at index context.state_slots[i]."""
+    recurrent state in conv_state / ssm_state at index context.state_slots[i].
+    Prefill runs the delta rule with FLA's chunked kernel, decode with gated_delta_rule_decode_kernel."""
 
     def __init__(
         self,
@@ -237,13 +225,51 @@ class LinearAttention(nn.Module):
         if decode_len:
             conv_state_update_decode_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
                 mixed_qkv, mixed_qkv.stride(0), conv_state, context.state_slots, C, DECODE_LEN=decode_len, BLOCK_C=BLOCK_C)
+            o = torch.empty(T, self.num_v_heads, self.head_v_dim, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+            BV = 32
+            gated_delta_rule_decode_kernel[(self.head_v_dim // BV, num_seqs * self.num_v_heads)](
+                x, x.stride(0), g, beta, o, ssm_state, context.state_slots, self.scale,
+                Hk=self.num_k_heads, Hv=self.num_v_heads, K=self.head_k_dim, V=self.head_v_dim, BV=BV, DECODE_LEN=decode_len)
         else:
             conv_state_update_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
                 mixed_qkv, mixed_qkv.stride(0), conv_state, *conv_args, BLOCK_C=BLOCK_C)
-        o = torch.empty(T, self.num_v_heads, self.head_v_dim, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-        BV = 32
-        gated_delta_rule_kernel[(self.head_v_dim // BV, num_seqs * self.num_v_heads)](
-            x, x.stride(0), g, beta, o, ssm_state,
-            context.cu_seqlens_q, context.state_slots, context.has_initial_state, self.scale,
-            Hk=self.num_k_heads, Hv=self.num_v_heads, K=self.head_k_dim, V=self.head_v_dim, BV=BV, DECODE_LEN=decode_len)
+            o = self.chunk_gated_delta_rule(x, g, beta, ssm_state, context)
         return o
+
+    def chunk_gated_delta_rule(self, x: torch.Tensor, g: torch.Tensor, beta: torch.Tensor, ssm_state: torch.Tensor, context):
+        # FLA works on dense per-sequence states: gather this batch's states from the slot pool, run FLA window by window
+        # (a sequence cut by a window boundary carries its state into the next window), then scatter the states back
+        Hk, Hv, K, V = self.num_k_heads, self.num_v_heads, self.head_k_dim, self.head_v_dim
+        state = ssm_state[context.state_slots] * context.has_initial_state.view(-1, 1, 1, 1)    # zero for new sequences
+        o = x.new_empty(x.size(0), Hv, V)
+        for start, end, first, last, cu_seqlens, cu_seqlens_cpu in context.fla_windows:
+            q, k, v = x[start:end].split([Hk * K, Hk * K, Hv * V], dim=-1)
+            q = q.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)    # FLA needs one q/k head per value head
+            k = k.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)
+            v = v.reshape(1, end - start, Hv, V).contiguous()
+            o_window, final_state = chunk_gated_delta_rule(
+                q, k, v, g[None, start:end], beta[None, start:end], scale=self.scale, initial_state=state[first:last],
+                output_final_state=True, use_qk_l2norm_in_kernel=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu)
+            o[start:end] = o_window[0]
+            state[first:last] = final_state
+        ssm_state[context.state_slots] = state
+        return o
+
+
+def plan_fla_windows(cu_seqlens: list[int], window: int = 8192):
+    """Cut a prefill batch into windows of at most `window` tokens for FLA, whose intermediates grow with the tokens
+    per call (~64 KB per token for Qwen3.5-4B). Each window is (start, end, first, last, cu_seqlens, cu_seqlens_cpu):
+    sequences first..last-1 overlap tokens [start, end), and cu_seqlens are their bounds inside the window (int64,
+    as FLA takes them; the CPU copy spares it a device-to-host sync)."""
+    windows = []
+    first = 0
+    for start in range(0, cu_seqlens[-1], window):
+        end = min(start + window, cu_seqlens[-1])
+        while cu_seqlens[first + 1] <= start:
+            first += 1
+        last = first + 1
+        while last < len(cu_seqlens) - 1 and cu_seqlens[last] < end:
+            last += 1
+        bounds = torch.tensor([0] + [min(c, end) - start for c in cu_seqlens[first + 1:last + 1]], dtype=torch.int64, device="cpu")
+        windows.append((start, end, first, last, bounds.pin_memory().cuda(non_blocking=True), bounds))
+    return windows
