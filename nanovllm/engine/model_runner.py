@@ -1,3 +1,4 @@
+import json
 import pickle
 import torch
 import torch.distributed as dist
@@ -40,6 +41,19 @@ class ModelRunner:
         self.linear_attn_layers = [m for m in self.model.modules() if isinstance(m, LinearAttention)]
         if self.num_speculative_tokens:
             assert self.linear_attn_layers and self.world_size == 1, "MTP speculative decoding needs Qwen3.5 on one GPU"
+        # drafting from a frequent subset of the vocabulary: the draft distribution is zero elsewhere,
+        # which rejection sampling handles like any other draft distribution
+        self.draft_ids = None
+        self.draft_vocab_size = hf_config.vocab_size
+        if config.draft_vocab:
+            with open(config.draft_vocab) as f:
+                self.draft_ids = torch.tensor(json.load(f), dtype=torch.int64)
+            self.draft_vocab_size = self.draft_ids.numel()
+            assert self.draft_ids.unique().numel() == self.draft_vocab_size and self.draft_ids.max() < hf_config.vocab_size
+            # release cached blocks first (e.g. the lm_head weight dropped by tie_word_embeddings): carved out of one,
+            # the copy would keep the rest of that block reserved, and out of the KV / state budget
+            torch.cuda.empty_cache()
+            self.model.set_draft_vocab(self.draft_ids)
         self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -142,7 +156,7 @@ class ModelRunner:
             + m.num_v_heads * m.head_k_dim * m.head_v_dim * 4
             for m in self.linear_attn_layers
         )
-        group_bytes = self.query_len * slot_bytes + self.num_speculative_tokens * config.hf_config.vocab_size * 4
+        group_bytes = self.query_len * slot_bytes + self.num_speculative_tokens * self.draft_vocab_size * 4
         num_groups = min(config.max_num_seqs, available // 2 // group_bytes - 1)
         assert num_groups > 0
         config.max_num_seqs = config.num_state_groups = num_groups
@@ -151,7 +165,7 @@ class ModelRunner:
             m.conv_state = torch.zeros(num_slots, m.conv_kernel_size - 1, m.conv_dim)
             m.ssm_state = torch.zeros(num_slots, m.num_v_heads, m.head_k_dim, m.head_v_dim, dtype=torch.float32)
         if self.num_speculative_tokens:
-            self.draft_probs = torch.zeros(num_groups + 1, config.hf_config.vocab_size, dtype=torch.float32)
+            self.draft_probs = torch.zeros(num_groups + 1, self.draft_vocab_size, dtype=torch.float32)
         return (num_groups + 1) * group_bytes
 
     def prepare_block_tables(self, seqs: list[Sequence]):
@@ -319,16 +333,22 @@ class ModelRunner:
             target_probs = compute_probs(logits.view(bs, self.query_len, -1), temperatures.unsqueeze(1))
             draft_tokens = [seq.draft_token for seq in seqs]
             draft_tokens = torch.tensor(draft_tokens, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-            tokens, num_accepted = rejection_sample(target_probs, draft_tokens, self.draft_probs[groups])
+            draft_probs = self.draft_probs[groups]
+            if self.draft_ids is not None:    # spread over the full vocabulary, zero outside the draft vocabulary
+                draft_probs = draft_probs.new_zeros(bs, target_probs.size(-1)).index_copy_(1, self.draft_ids, draft_probs)
+            tokens, num_accepted = rejection_sample(target_probs, draft_tokens, draft_probs)
             # run MTP on every verified position (fixed shape) and keep the row of the last accepted token;
             # rows past it write MTP KV that the next step overwrites
             draft_hidden = self.run_mtp(tokens.flatten(), positions, hidden_states)
             draft_hidden = draft_hidden.view(bs, self.query_len, -1)[torch.arange(bs, device=groups.device), num_accepted]
             token_ids = [t[:n + 1] for t, n in zip(tokens.tolist(), num_accepted.tolist())]
-        draft_probs = compute_probs(self.model.compute_logits(draft_hidden), temperatures)
+        draft_probs = compute_probs(self.model.compute_draft_logits(draft_hidden), temperatures)
         if self.draft_probs is not None:    # not allocated yet during warmup
             self.draft_probs[groups] = draft_probs
-        return token_ids, sample_from_probs(draft_probs).tolist()
+        draft_tokens = sample_from_probs(draft_probs)
+        if self.draft_ids is not None:    # index in the draft vocabulary -> token id
+            draft_tokens = self.draft_ids[draft_tokens]
+        return token_ids, draft_tokens.tolist()
 
     @torch.inference_mode()
     def capture_cudagraph(self):

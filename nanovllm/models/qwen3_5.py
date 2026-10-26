@@ -247,6 +247,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
+        self.draft_head = None    # lm_head rows of the draft vocabulary, see set_draft_vocab
 
     def forward(
         self,
@@ -268,3 +269,17 @@ class Qwen3_5ForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         return self.lm_head(hidden_states)
+
+    def set_draft_vocab(
+        self,
+        token_ids: torch.Tensor,
+    ) -> None:
+        # call after loading weights: the copy keeps drafting to a [len(token_ids), hidden] matmul
+        self.draft_head = self.lm_head.weight.data[token_ids].contiguous()
+
+    def compute_draft_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        # logits over the draft vocabulary (the full vocabulary unless set_draft_vocab was called)
+        return self.lm_head(hidden_states, self.draft_head)

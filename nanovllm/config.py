@@ -18,12 +18,14 @@ class Config:
     num_kvcache_blocks: int = -1
     num_state_groups: int = 0
     num_speculative_tokens: int = 0
+    draft_vocab: str | None = None    # JSON list of token ids the MTP head drafts from (default: the full vocabulary)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         assert self.num_speculative_tokens in (0, 1), "only one MTP draft token per step is supported"
+        assert self.draft_vocab is None or self.num_speculative_tokens > 0
         self.hf_config = AutoConfig.from_pretrained(self.model)
         if hasattr(self.hf_config, "text_config"):    # vision-language checkpoints (e.g. Qwen3.5) nest the LLM config
             text_config = self.hf_config.text_config

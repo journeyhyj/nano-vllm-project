@@ -53,12 +53,13 @@ class ParallelLMHead(VocabParallelEmbedding):
         assert not bias
         super().__init__(num_embeddings, embedding_dim)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, weight: torch.Tensor | None = None):
+        # weight: a subset of the rows of self.weight, to score only those tokens (single GPU)
         context = get_context()
         if context.is_prefill:
             last_indices = context.cu_seqlens_q[1:] - 1
             x = x[last_indices].contiguous()
-        logits = F.linear(x, self.weight)
+        logits = F.linear(x, self.weight if weight is None else weight)
         if self.tp_size > 1:
             all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
             dist.gather(logits, all_logits, 0)
