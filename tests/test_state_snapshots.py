@@ -1,6 +1,8 @@
 # Recurrent-state snapshots of LinearAttention (prefix caching for hybrid models), bit for bit:
-#  - plan_fla_windows cuts at 64-aligned offsets and at snapshot rows
-#  - a snapshot taken at a block boundary inside a prefill batch equals the state after prefilling just that prefix
+#  - plan_fla_windows cuts at 64-aligned offsets; a snapshot row inside a sequence gets an extra FLA sequence ending at
+#    the row, or a window cut when the extra tokens do not fit the window
+#  - a snapshot taken at a block boundary inside a prefill batch equals the state after prefilling just that prefix,
+#    through extra sequences, window cuts or both
 #  - restoring a snapshot into another slot and prefilling the rest gives the same outputs and states as never stopping
 #  - a chunk that starts 1-2 tokens before a boundary takes the conv snapshot partly from the previous conv state
 #  - a sequence's outputs do not depend on where it sits in the batch (FLA windows used to cut it at unaligned offsets)
@@ -84,17 +86,39 @@ def test_window_plan():
     # second sequence starts at 3192: the 8192 cut falls 5000 tokens into it and moves back to 4992 = 78 * 64
     windows = plan_fla_windows([0, 3192, 11192], 8192)
     assert [(w[0], w[1]) for w in windows] == [(0, 8184), (8184, 11192)]
-    # snapshot rows end windows; a row at a sequence end does not cut
-    windows = plan_fla_windows([0, 1000, 1300], 8192, [(0, 256, 5), (0, 768, 6), (1, 1300, 7)])
-    assert [(w[0], w[1]) for w in windows] == [(0, 256), (256, 768), (768, 1300)]
-    assert [None if w[6] is None else (w[6][0].tolist(), w[6][1].tolist()) for w in windows] == [([0], [5]), ([0], [6]), ([1], [7])]
+    snaps = lambda w: None if w[6] is None else (w[6][0].tolist(), w[6][1].tolist())
+    # rows inside a sequence ride along as extra sequences [0, 256) and [0, 768); a row at a sequence end is its state
+    (w,) = plan_fla_windows([0, 1000, 1300], 8192, [(0, 256, 5), (0, 768, 6), (1, 1300, 7)])
+    assert (w[0], w[1]) == (0, 1300) and w[5].tolist() == [0, 1000, 1300, 1556, 2324]
+    assert snaps(w) == ([2, 3, 1], [5, 6, 7])
+    assert w[7][0].tolist() == list(range(1300)) + list(range(256)) + list(range(768)) and w[7][1].tolist() == [0, 1, 0, 0]
+    # no room for extra tokens in a 1024-token window: the rows cut it instead
+    windows = plan_fla_windows([0, 1000, 1300], 1024, [(0, 256, 5), (0, 768, 6), (1, 1300, 7)])
+    assert [(w[0], w[1]) for w in windows] == [(0, 256), (256, 768), (768, 1000), (1000, 1300)]
+    assert [snaps(w) for w in windows] == [([0], [5]), ([0], [6]), None, ([0], [7])] and all(w[7] is None for w in windows)
+    # mixed: [0, 1536) does not fit next to 1700 tokens and cuts; [0, 256) then fits in the window before the cut
+    windows = plan_fla_windows([0, 1700], 2048, [(0, 256, 1), (0, 1536, 2)])
+    assert [(w[0], w[1]) for w in windows] == [(0, 1536), (1536, 1700)]
+    assert snaps(windows[0]) == ([1, 0], [1, 2]) and windows[0][5].tolist() == [0, 1536, 1792]
+    assert windows[1][6] is None and windows[1][7] is None
+    # one cut per window and round, so cuts make room: 26 prompts of 300 tokens, a row at 256 in each, run in 4 calls
+    windows = plan_fla_windows([300 * k for k in range(27)], 8192, [(k, 300 * k + 256, k) for k in range(26)])
+    assert [(w[0], w[1]) for w in windows] == [(0, 556), (556, 1756), (1756, 4456), (4456, 7800)]
+    assert sum(len(w[6][1]) for w in windows) == 26 and all(w[5][-1] <= 8192 for w in windows)
+    # a call with extra sequences stays within the budget (the largest call of the engine's warmup), else the row cuts
+    (w,) = plan_fla_windows([0, 2048], 8192, [(0, 1792, 0)])
+    assert w[5].tolist() == [0, 2048, 3840]
+    windows = plan_fla_windows([0, 2048], 8192, [(0, 1792, 0)], budget=2048)
+    assert [(w[0], w[1]) for w in windows] == [(0, 1792), (1792, 2048)] and windows[0][7] is None
 
 
-def test_snapshots_and_restore():
+def test_snapshots_and_restore(window):
     h = Harness()
     A, B = h.inputs(1000), h.inputs(512)
-    # one batch: A cut at 256 / 512 / 768, B snapshotted at its end (512)
-    out_A, _ = h.prefill([A, B], [0, 1], [0, 0], snapshots=[(0, 256, 0), (0, 512, 1), (0, 768, 2), (1, 512, 3)])
+    rows = [(0, 256, 0), (0, 512, 1), (0, 768, 2), (1, 512, 3)]
+    plan = plan_fla_windows([0, 1000, 1512], window, [(i, [0, 1000][i] + off, sid) for i, off, sid in rows])
+    # one batch: A snapshotted at 256 / 512 / 768, B at its end (512)
+    out_A, _ = h.prefill([A, B], [0, 1], [0, 0], snapshots=rows, window=window)
     full_A = h.state(0)
     for b, sid in ((256, 0), (512, 1), (768, 2)):
         h.prefill([cut(A, 0, b)], [5], [0])
@@ -108,7 +132,8 @@ def test_snapshots_and_restore():
     (tail,) = h.prefill([cut(A, 512, 1000)], [7], [1])
     assert torch.equal(tail, ref_A[512:]), (tail.float() - ref_A[512:].float()).abs().max()
     assert same(h.state(7), full_A)
-    print("snapshot / restore: bit-identical")
+    extra = sum(w[7] is not None and (len(w[7][0]) - (w[1] - w[0])) for w in plan)
+    print(f"snapshot / restore, window {window}: bit-identical ({len(plan)} FLA calls, {extra} extra tokens)")
 
 
 def test_conv_fallback():
@@ -140,7 +165,8 @@ def test_batch_position_invariance():
 if __name__ == "__main__":
     print(f"pinned {pin_fla_autotune()} FLA autotuners")
     test_window_plan()
-    test_snapshots_and_restore()
+    for window in (8192, 2048, 1024):    # extra sequences only, extra sequences and cuts, cuts only
+        test_snapshots_and_restore(window)
     test_conv_fallback()
     test_batch_position_invariance()
     print("PASS")

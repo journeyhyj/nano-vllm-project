@@ -256,38 +256,55 @@ class LinearAttention(nn.Module):
         Hk, Hv, K, V = self.num_k_heads, self.num_v_heads, self.head_k_dim, self.head_v_dim
         state = ssm_state[context.state_slots] * context.has_initial_state.view(-1, 1, 1, 1)    # zero for new sequences
         o = x.new_empty(x.size(0), Hv, V)
-        for start, end, first, last, cu_seqlens, cu_seqlens_cpu, snapshots in context.fla_windows:
-            q, k, v = x[start:end].split([Hk * K, Hk * K, Hv * V], dim=-1)
-            q = q.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)    # FLA needs one q/k head per value head
-            k = k.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)
-            v = v.reshape(1, end - start, Hv, V).contiguous()
+        for start, end, first, last, cu_seqlens, cu_seqlens_cpu, snapshots, extra in context.fla_windows:
+            if extra is None:
+                xw, gw, bw, h0 = x[start:end], g[start:end], beta[start:end], state[first:last]
+            else:    # plus extra sequences that end at snapshot rows, see plan_fla_windows
+                rows, seqs = extra
+                xw, gw, bw, h0 = x[rows], g[rows], beta[rows], state[seqs]
+            n = xw.size(0)
+            q, k, v = xw.split([Hk * K, Hk * K, Hv * V], dim=-1)
+            q = q.reshape(1, n, Hk, K).repeat_interleave(Hv // Hk, dim=2)    # FLA needs one q/k head per value head
+            k = k.reshape(1, n, Hk, K).repeat_interleave(Hv // Hk, dim=2)
+            v = v.reshape(1, n, Hv, V).contiguous()
+            del xw
             o_window, final_state = chunk_gated_delta_rule(
-                q, k, v, g[None, start:end], beta[None, start:end], scale=self.scale, initial_state=state[first:last],
+                q, k, v, gw[None], bw[None], scale=self.scale, initial_state=h0,
                 output_final_state=True, use_qk_l2norm_in_kernel=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu)
-            o[start:end] = o_window[0]
-            state[first:last] = final_state
-            if snapshots is not None:    # these sequences end this window exactly at a block boundary
+            o[start:end] = o_window[0, :end - start]
+            state[first:last] = final_state[:last - first]
+            if snapshots is not None:    # states at block boundaries: sequences ending there, or extra sequences
                 index, ids = snapshots
                 self.ssm_snap[ids] = final_state[index]
         ssm_state[context.state_slots] = state
         return o
 
 
-def plan_fla_windows(cu_seqlens: list[int], window: int = 8192, snapshots=(), align: int = 64):
+def plan_fla_windows(cu_seqlens: list[int], window: int = 8192, snapshots=(), align: int = 64, budget: int | None = None):
     """Cut a prefill batch into windows of at most `window` tokens for FLA, whose intermediates grow with the tokens
     per call (~64 KB per token for Qwen3.5-4B). Each window is (start, end, first, last, cu_seqlens, cu_seqlens_cpu,
-    snapshots): sequences first..last-1 overlap tokens [start, end), and cu_seqlens are their bounds inside the window
-    (int64, as FLA takes them; the CPU copy spares it a device-to-host sync).
+    snapshots, extra): sequences first..last-1 overlap tokens [start, end), and cu_seqlens are their bounds inside the
+    window (int64, as FLA takes them; the CPU copy spares it a device-to-host sync).
 
     A window that ends inside a sequence ends a multiple of `align` tokens after that sequence's start: FLA splits every
     sequence into 64-token chunks from its start, so such a cut leaves the arithmetic unchanged (bit for bit) and the
     result does not depend on where the sequence sits in the batch.
-    snapshots: (sequence index, row, snapshot id) with cu_seqlens[i] < row <= cu_seqlens[i + 1]. A window also ends at
-    each row, so the sequence's final state in that window is its state at the row; the window then carries
-    (indices into its final states, snapshot ids) as a pair of CUDA tensors, else None."""
+
+    snapshots: (sequence index, row, snapshot id) with cu_seqlens[i] < row <= cu_seqlens[i + 1], to save the state at
+    the row. A row that is the sequence's last row in its window is that sequence's final state there. Any other row is
+    served by an extra sequence appended to the window's FLA call: the sequence's tokens in the window up to the row,
+    from the same initial state, so its final state is the state at the row. That costs those tokens' GPU time once
+    more but no extra FLA call (24 calls per prefill step for Qwen3.5-4B, ~1 ms of host time each). A call with extra
+    sequences runs at most `budget` tokens (default `window`; ModelRunner passes the largest call its warmup ran, which
+    sized the KV cache). Rows whose extra sequences do not fit get window cuts instead, one per window and round, so
+    that each cut makes room for the extra sequences of the rows around it.
+    `snapshots` of a window: (indices into its final states, snapshot ids) as a pair of CUDA tensors, else None;
+    `extra`: (token rows, sequence indices) of everything the call runs, the window's own then the extra ones, else
+    None (the call then takes the window's tokens and sequences first..last-1 as slices)."""
     total = cu_seqlens[-1]
     align = math.gcd(window, align)
-    ends = set()
+    budget = window if budget is None else min(budget, window)
+    regular = set()
     pos, j = 0, 0
     while pos < total:
         end = pos + window
@@ -297,13 +314,28 @@ def plan_fla_windows(cu_seqlens: list[int], window: int = 8192, snapshots=(), al
             end = cu_seqlens[j] + (end - cu_seqlens[j]) // align * align
         else:
             end = total
-        ends.add(end)
+        regular.add(end)
         pos = end
-    ends.update(row for i, row, _ in snapshots if row < cu_seqlens[i + 1])    # rows at a sequence end need no cut
-    ends = sorted(ends)
+    cuts = set()
+    while True:    # every round but the last adds a cut, so this ends; the last round admits every remaining row
+        ends = sorted(regular | cuts)
+        load, new_cuts = {}, {}
+        for i, row, _ in sorted(snapshots, key=lambda s: s[1]):
+            w = bisect.bisect_left(ends, row)
+            start = ends[w - 1] if w else 0
+            if row == min(cu_seqlens[i + 1], ends[w]) or w in new_cuts:
+                continue
+            n = row - max(cu_seqlens[i], start)
+            if ends[w] - start + load.get(w, 0) + n <= budget:
+                load[w] = load.get(w, 0) + n
+            else:
+                new_cuts[w] = row
+        if not new_cuts:
+            break
+        cuts.update(new_cuts.values())
     per_window = [[] for _ in ends]
     for i, row, sid in snapshots:
-        per_window[bisect.bisect_left(ends, row)].append((i, sid))
+        per_window[bisect.bisect_left(ends, row)].append((i, row, sid))
     windows = []
     first, start = 0, 0
     for end, snaps in zip(ends, per_window):
@@ -312,13 +344,26 @@ def plan_fla_windows(cu_seqlens: list[int], window: int = 8192, snapshots=(), al
         last = first + 1
         while last < len(cu_seqlens) - 1 and cu_seqlens[last] < end:
             last += 1
-        bounds = torch.tensor([0] + [min(c, end) - start for c in cu_seqlens[first + 1:last + 1]], dtype=torch.int64, device="cpu")
-        if snaps:
-            assert all(first <= i < last for i, _ in snaps)
-            snaps = torch.tensor([[i - first for i, _ in snaps], [sid for _, sid in snaps]], dtype=torch.int64, device="cpu")
-            snaps = tuple(snaps.pin_memory().cuda(non_blocking=True))
-        else:
-            snaps = None
-        windows.append((start, end, first, last, bounds.pin_memory().cuda(non_blocking=True), bounds, snaps))
+        bounds = [0] + [min(c, end) - start for c in cu_seqlens[first + 1:last + 1]]
+        index, ids, rows, seqs = [], [], [], []
+        for i, row, sid in snaps:
+            assert first <= i < last
+            ids.append(sid)
+            if row == min(cu_seqlens[i + 1], end):
+                index.append(i - first)
+            else:
+                index.append(last - first + len(seqs))
+                rows.append((max(cu_seqlens[i], start), row))
+                seqs.append(i)
+                bounds.append(bounds[-1] + row - rows[-1][0])
+        snaps = extra = None
+        if ids:
+            snaps = tuple(torch.tensor([index, ids], dtype=torch.int64, device="cpu").pin_memory().cuda(non_blocking=True))
+        if rows:
+            token_rows = torch.cat([torch.arange(a, b, device="cpu") for a, b in [(start, end)] + rows])
+            seq_ids = torch.tensor(list(range(first, last)) + seqs, dtype=torch.int64, device="cpu")
+            extra = (token_rows.pin_memory().cuda(non_blocking=True), seq_ids.pin_memory().cuda(non_blocking=True))
+        bounds = torch.tensor(bounds, dtype=torch.int64, device="cpu")    # CPU even under a CUDA default device
+        windows.append((start, end, first, last, bounds.pin_memory().cuda(non_blocking=True), bounds, snaps, extra))
         start = end
     return windows

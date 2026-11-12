@@ -122,6 +122,9 @@ class ModelRunner:
         seq_len = min(max_num_batched_tokens, max_model_len)
         num_seqs = min(max_num_batched_tokens // seq_len, self.config.max_num_seqs)
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
+        # the largest FLA call of this run sizes the KV cache, so calls that carry extra sequences (prefix-cache
+        # snapshots, see plan_fla_windows) stay within it
+        self.fla_budget = min(8192, num_seqs * seq_len)
         for i, seq in enumerate(seqs):
             seq.num_scheduled_tokens = seq_len
             seq.state_slots = [i]
@@ -257,7 +260,7 @@ class ModelRunner:
             if restores:
                 self.copy_states(*zip(*restores), to_snapshots=False)
             # shared by all linear attention layers of this step
-            fla_windows = plan_fla_windows(cu_seqlens_q, snapshots=snapshots)
+            fla_windows = plan_fla_windows(cu_seqlens_q, snapshots=snapshots, budget=self.fla_budget)
             if snapshots:
                 conv_snapshots = self.prepare_conv_snapshots(seqs, cu_seqlens_q, snapshots)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
