@@ -22,6 +22,7 @@ from dataclasses import fields
 import numpy as np
 import torch
 
+import nanovllm
 from nanovllm import LLM, SamplingParams
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
@@ -263,10 +264,10 @@ def main():
     hit_tokens = sum(c for c, _ in first_adm.values())
     mr = llm.model_runner
     config = mr.config
-    git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
-                         cwd=os.path.dirname(os.path.abspath(__file__))).stdout.strip()
+    code = os.path.dirname(os.path.abspath(nanovllm.__file__))    # the engine actually imported (PYTHONPATH worktrees)
+    git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=code).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True,
-                           cwd=os.path.dirname(os.path.abspath(__file__))).stdout.strip()
+                           cwd=code).stdout.strip()
     result = dict(
         workload=args.workload, prefix=args.prefix, qps=args.qps, policy=args.policy or "engine default",
         requests=len(recs), wall_s=wall,
@@ -284,7 +285,7 @@ def main():
         engine=dict(engine_kwargs, kvcache_block_size=config.kvcache_block_size),
         gpu=torch.cuda.get_device_name(), torch=torch.__version__,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), cuda_device_order=os.environ.get("CUDA_DEVICE_ORDER"),
-        loadavg_before=load_before, loadavg_after=load_after, git=git + ("-dirty" if dirty else ""),
+        loadavg_before=load_before, loadavg_after=load_after, git=git + ("-dirty" if dirty else ""), nanovllm_path=code,
         max_tokens=args.max_tokens, seed=args.seed,
         mtp_acceptance=accepted["tokens"] / accepted["steps"] if accepted["steps"] else None, **{k: v for k, v in info.items() if k != "prompt_tokens"},
     )

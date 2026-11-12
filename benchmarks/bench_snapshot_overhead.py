@@ -3,6 +3,8 @@
 #         window cuts (last: 1 per prompt, all: 1 per 256 tokens) and state copies
 #   hit   prefill latency of a --len + --tail token prompt sent for the 3rd time (every policy then has a snapshot at
 #         its last full block; branch saves it on the 2nd occurrence): restore + prefill of the last partial block
+#   short prefill latency of a fresh --tail token prompt: the engine's fixed cost of a prefill step (eager, not a CUDA
+#         graph), which bounds a hit from below
 #   copy  time of copying one snapshot into a state slot (all linear-attention layers), CUDA events
 # Usage: python benchmarks/bench_snapshot_overhead.py <model> --policy branch --len 8000 [--tail 64] [--repeats 5]
 import argparse
@@ -10,10 +12,12 @@ import json
 import os
 import random
 import statistics
+import subprocess
 import time
 
 import torch
 
+import nanovllm
 from nanovllm import LLM, SamplingParams
 
 
@@ -42,10 +46,11 @@ def main():
               num_state_snapshots=args.num_state_snapshots)
     rng = random.Random(0)
     fresh = lambda n: [rng.randint(1000, 100000) for _ in range(n)]
-    for n in (64, args.len, args.len + args.tail):    # warmup: compile and autotune
+    for n in (args.tail, args.len, args.len + args.tail):    # warmup: compile and autotune
         timed_prefill(llm, fresh(n))
 
     miss = [timed_prefill(llm, fresh(args.len + args.tail)) for _ in range(args.repeats)]
+    short = [timed_prefill(llm, fresh(args.tail)) for _ in range(args.repeats)]
     hit, cached = [], []
     for _ in range(args.repeats):
         prompt = fresh(args.len + args.tail)
@@ -70,10 +75,14 @@ def main():
     result = dict(policy=args.policy, len=args.len, tail=args.tail, repeats=args.repeats,
                   miss_prefill_ms=statistics.median(miss), miss_all_ms=miss,
                   hit_prefill_ms=statistics.median(hit), hit_all_ms=hit, hit_cached_tokens=cached,
+                  short_prefill_ms=statistics.median(short), short_all_ms=short,
                   snapshot_restore_copy_ms=copy_ms, snapshot_bytes_each=getattr(mr, "state_bytes", 0),
                   num_state_snapshots=mr.config.num_state_snapshots, num_kvcache_blocks=mr.config.num_kvcache_blocks,
                   stats=llm.scheduler.block_manager.stats, gpu=torch.cuda.get_device_name(),
                   cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+    code = os.path.dirname(os.path.abspath(nanovllm.__file__))    # the engine actually imported (PYTHONPATH worktrees)
+    git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True, cwd=code).stdout.strip()
+    result.update(nanovllm_path=code, git=git("rev-parse", "--short", "HEAD") + ("-dirty" if git("status", "--porcelain", "--untracked-files=no") else ""))
     print(json.dumps({k: (round(v, 2) if isinstance(v, float) else v) for k, v in result.items()}, indent=1))
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

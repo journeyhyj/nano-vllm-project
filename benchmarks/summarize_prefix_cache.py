@@ -1,6 +1,7 @@
 # Turns bench_prefix_cache.py JSON records into Markdown tables: one row per (run, policy), repeats shown as mean and
 # min-max; TTFT speedups are relative to the baseline directory (the engine before hybrid prefix caching).
 # Usage: python benchmarks/summarize_prefix_cache.py benchmarks/results/baseline benchmarks/results/after [...] > table.md
+#        (with more than one directory after the baseline, policies are labelled "policy@directory")
 import glob
 import json
 import os
@@ -9,16 +10,23 @@ import sys
 from collections import defaultdict
 
 
+POLICIES = ["off", "kv_only", "last", "branch", "all"]
+
+
 def load(dirs):
     groups = defaultdict(list)    # (run name, policy label) -> records
-    for d in dirs:
+    for k, d in enumerate(dirs):
         label = os.path.basename(os.path.normpath(d))
         for path in sorted(glob.glob(os.path.join(d, "*.json"))):
-            m = re.match(r"(.+)_(\w+)_r(\d+)\.json$", os.path.basename(path))
+            m = re.match(rf"(.+)_({'|'.join(POLICIES)}|default)_r(\d+)\.json$", os.path.basename(path))
             run, policy = m.group(1), m.group(2)
+            if policy == "default":
+                policy = label
+            elif k and len(dirs) > 2:
+                policy = f"{policy}@{label}"
             rec = json.load(open(path))
             rec["path"] = path
-            groups[(run, policy if policy != "default" else label)].append(rec)
+            groups[(run, policy)].append(rec)
     return groups
 
 
@@ -34,12 +42,13 @@ def main():
     groups = load(dirs)
     runs = sorted({run for run, _ in groups}, key=lambda r: (r.split("_")[0].rstrip("0123456789"), int(re.search(r"\d+", r).group()), r))
     baseline_label = os.path.basename(os.path.normpath(dirs[0]))
-    order = [baseline_label, "off", "kv_only", "last", "branch", "all"]
+    order = [baseline_label] + POLICIES
     print("| run | policy | n | TTFT p50 ms | TTFT p99 ms | p50 speedup | hit rate | prefill tokens computed | "
           "output tok/s | snapshots (MiB) | KV blocks |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for run in runs:
-        policies = sorted({p for r, p in groups if r == run}, key=lambda p: order.index(p) if p in order else 99)
+        policies = sorted({p for r, p in groups if r == run},
+                          key=lambda p: (order.index(p.split("@")[0]) if p.split("@")[0] in order else 99, p))
         base = groups.get((run, baseline_label))
         base_p50 = sum(r["ttft_p50_ms"] for r in base) / len(base) if base else None
         for policy in policies:
