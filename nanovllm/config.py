@@ -19,10 +19,22 @@ class Config:
     num_state_groups: int = 0
     num_speculative_tokens: int = 0
     draft_vocab: str | None = None    # JSON list of token ids the MTP head drafts from (default: the full vocabulary)
+    # prefix caching. Hybrid models (linear + full attention) can only reuse a cached prefix together with the recurrent
+    # state at its end, so they keep snapshots of that state at chosen block boundaries:
+    #   "branch": where a new request's cached KV prefix runs past the last snapshot (a prefix seen before), plus the
+    #             latest block boundary each sequence has reached (Marconi-style admission)
+    #   "last":   the last full block of each prompt, plus the latest block boundary each sequence has reached
+    #   "all":    every block boundary
+    #   "kv_only": share cached KV blocks but recompute every token (no state snapshots; a control: saves memory only)
+    #   "off":    no prefix caching
+    # Models without linear attention cache every full block whenever the policy is not "off".
+    prefix_cache_policy: str = "branch"
+    num_state_snapshots: int = -1    # hybrid models: size of the snapshot pool (-1: up to 64, at most 25% of free memory)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
+        assert self.prefix_cache_policy in ("off", "kv_only", "last", "branch", "all")
         assert 1 <= self.tensor_parallel_size <= 8
         assert self.num_speculative_tokens in (0, 1), "only one MTP draft token per step is supported"
         assert self.draft_vocab is None or self.num_speculative_tokens > 0

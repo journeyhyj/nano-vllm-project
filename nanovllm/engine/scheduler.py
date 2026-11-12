@@ -14,7 +14,8 @@ class Scheduler:
         self.block_size = config.kvcache_block_size
         self.num_speculative_tokens = config.num_speculative_tokens
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size,
-                                          config.num_state_groups, 1 + config.num_speculative_tokens)
+                                          config.num_state_groups, 1 + config.num_speculative_tokens,
+                                          config.prefix_cache_policy, max(config.num_state_snapshots, 0))
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -27,6 +28,7 @@ class Scheduler:
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
+        snapshot_hashes = set()
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
@@ -35,17 +37,19 @@ class Scheduler:
             if remaining == 0:
                 break
             if not seq.block_table:
-                num_cached_blocks = self.block_manager.can_allocate(seq)
-                if num_cached_blocks == -1:
+                match = self.block_manager.can_allocate(seq)
+                if match is None:
                     break
+                num_cached_blocks, num_matched_blocks = match
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
             else:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
                 break
             if not seq.block_table:
-                self.block_manager.allocate(seq, num_cached_blocks)
+                self.block_manager.allocate(seq, num_cached_blocks, num_matched_blocks)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
+            self.block_manager.plan_prefill_snapshots(seq, snapshot_hashes)
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING
@@ -70,6 +74,7 @@ class Scheduler:
                 seq.num_scheduled_tokens = num_tokens
                 seq.is_prefill = False
                 self.block_manager.may_append(seq, num_tokens)
+                self.block_manager.plan_decode_snapshots(seq, num_tokens)
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
@@ -83,8 +88,9 @@ class Scheduler:
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int] | list[list[int]], is_prefill: bool,
                     draft_tokens: list[int] | None = None):
+        block_manager = self.block_manager
         for i, seq in enumerate(seqs):
-            self.block_manager.hash_blocks(seq)
+            num_old_cached_tokens = seq.num_cached_tokens
             if draft_tokens is not None and not is_prefill:
                 # verified [last token, draft]: accepted drafts plus one corrected/bonus token come back,
                 # and KV / recurrent state stay valid up to the last accepted draft
@@ -98,13 +104,21 @@ class Scheduler:
                 seq.num_cached_tokens += seq.num_scheduled_tokens
             seq.num_scheduled_tokens = 0
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+                block_manager.hash_blocks(seq, num_old_cached_tokens)
+                block_manager.finish_step(seq)
                 continue
             if draft_tokens is not None:
                 seq.draft_token = draft_tokens[i]
+            finished = False
             for token_id in new_tokens:
                 seq.append_token(token_id)
                 if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
-                    seq.status = SequenceStatus.FINISHED
-                    self.block_manager.deallocate(seq)
-                    self.running.remove(seq)
+                    finished = True
                     break
+            # hash only now: an accepted draft token has just been appended, and only computed positions get hashed
+            block_manager.hash_blocks(seq, num_old_cached_tokens)
+            block_manager.finish_step(seq)
+            if finished:
+                seq.status = SequenceStatus.FINISHED
+                block_manager.deallocate(seq)
+                self.running.remove(seq)
