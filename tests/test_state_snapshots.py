@@ -6,8 +6,11 @@
 #  - restoring a snapshot into another slot and prefilling the rest gives the same outputs and states as never stopping
 #  - a chunk that starts 1-2 tokens before a boundary takes the conv snapshot partly from the previous conv state
 #  - a sequence's outputs do not depend on where it sits in the batch (FLA windows used to cut it at unaligned offsets)
+#  - plan_fla_windows on random batches: every call within budget, every snapshot served once from the right tokens,
+#    and never more FLA calls than cutting at every snapshot row (the previous planner)
 # FLA autotuning is pinned (fla_pin.py) so that window sizes do not pick different kernel configs.
 # Usage: python tests/test_state_snapshots.py   (needs a GPU)
+import random
 from types import SimpleNamespace
 
 import torch
@@ -112,6 +115,64 @@ def test_window_plan():
     assert [(w[0], w[1]) for w in windows] == [(0, 1792), (1792, 2048)] and windows[0][7] is None
 
 
+def test_window_plan_fuzz(cases=2000, seed=0):
+    rng = random.Random(seed)
+    calls = cut_calls = extra_tokens = real_tokens = 0
+    for _ in range(cases):
+        lengths = [rng.choice([rng.randint(1, 300), rng.randint(1, 3000), rng.randint(1, 12000)])
+                   for _ in range(rng.randint(1, 16))]
+        cu = [0]
+        for n in lengths:
+            cu.append(cu[-1] + n)
+        window = rng.choice([8192, 8192, 4096, 2048, 64 * rng.randint(1, 128)])
+        budget = rng.choice([None, None, rng.randint(64, 16384)])
+        snapshots = []
+        for i, n in enumerate(lengths):    # block boundaries after a cached prefix (the engine's case), some at the end
+            cached = rng.choice([0, 0, 256, 512, 16384, rng.randint(0, 1000)])
+            rows = [b - cached for b in range(256, cached + n + 1, 256) if b > cached and rng.random() < 0.5]
+            if rng.random() < 0.3:
+                rows.append(n)
+            snapshots += [(i, cu[i] + r, len(snapshots) + k) for k, r in enumerate(sorted(set(rows)))]
+        rng.shuffle(snapshots)
+        windows = plan_fla_windows(cu, window, snapshots, budget=budget)
+        limit = window if budget is None else min(window, budget)
+        done = [0] * len(lengths)    # tokens of each sequence that FLA has run, as the layer carries states
+        served = {}
+        assert windows[0][0] == 0 and windows[-1][1] == cu[-1]
+        for k, (start, end, first, last, cu_gpu, bounds, snaps, extra) in enumerate(windows):
+            assert start < end and (k == 0 or windows[k - 1][1] == start)
+            bounds = bounds.tolist()
+            assert cu_gpu.tolist() == bounds and bounds[last - first] == end - start
+            if extra is not None:
+                assert bounds[-1] <= limit, (bounds[-1], limit)
+                rows, seqs = extra[0].tolist(), extra[1].tolist()
+                assert rows[:end - start] == list(range(start, end)) and seqs[:last - first] == list(range(first, last))
+            else:
+                rows, seqs = list(range(start, end)), list(range(first, last))
+            states = [done[i] for i in seqs]    # initial states, gathered before the call
+            for j, i in enumerate(seqs):        # every FLA sequence continues its sequence from the state it got
+                span = rows[bounds[j]:bounds[j + 1]]
+                assert span == list(range(cu[i] + states[j], cu[i] + states[j] + len(span))) and span
+                states[j] += len(span)
+            for j, i in enumerate(range(first, last)):
+                done[i] = states[j]
+            if snaps is not None:
+                for j, sid in zip(*(t.tolist() for t in snaps)):
+                    assert sid not in served
+                    served[sid] = (seqs[j], states[j])
+            calls += 1
+            real_tokens += end - start
+            extra_tokens += bounds[-1] - (end - start)
+        assert done == lengths
+        assert served == {sid: (i, row - cu[i]) for i, row, sid in snapshots}    # the state right at each row
+        regular = len(plan_fla_windows(cu, window))
+        cut = len(set(w[1] for w in plan_fla_windows(cu, window)) | {row for i, row, _ in snapshots if row < cu[i + 1]})
+        assert len(windows) <= cut and len(windows) >= regular
+        cut_calls += cut
+    print(f"window plan fuzz: {cases} batches, {calls} FLA calls (cutting at every row: {cut_calls}), "
+          f"extra tokens {100 * extra_tokens / real_tokens:.1f}% of the batch tokens")
+
+
 def test_snapshots_and_restore(window):
     h = Harness()
     A, B = h.inputs(1000), h.inputs(512)
@@ -165,6 +226,7 @@ def test_batch_position_invariance():
 if __name__ == "__main__":
     print(f"pinned {pin_fla_autotune()} FLA autotuners")
     test_window_plan()
+    test_window_plan_fuzz()
     for window in (8192, 2048, 1024):    # extra sequences only, extra sequences and cuts, cuts only
         test_snapshots_and_restore(window)
     test_conv_fallback()
