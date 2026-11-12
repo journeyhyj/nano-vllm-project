@@ -230,6 +230,16 @@ def main():
                      [SamplingParams(temperature=1e-5, max_tokens=rng.randint(4, 24)) for _ in lengths], use_tqdm=False)
     torch.cuda.synchronize()
 
+    accepted = dict(steps=0, tokens=0)    # MTP: draft tokens accepted per sequence and decode step
+    if args.k:
+        mr_run = llm.model_runner.run
+        def counting_run(seqs, is_prefill):
+            result = mr_run(seqs, is_prefill)
+            if not is_prefill:
+                accepted["steps"] += len(seqs)
+                accepted["tokens"] += sum(len(t) - 1 for t in result[0])
+            return result
+        llm.model_runner.run = counting_run
     run = run_shared if args.workload == "shared" else run_multiturn
     t0 = time.perf_counter()
     driver, info = run(llm, args, questions, doc)
@@ -275,7 +285,8 @@ def main():
         gpu=torch.cuda.get_device_name(), torch=torch.__version__,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), cuda_device_order=os.environ.get("CUDA_DEVICE_ORDER"),
         loadavg_before=load_before, loadavg_after=load_after, git=git + ("-dirty" if dirty else ""),
-        max_tokens=args.max_tokens, seed=args.seed, **{k: v for k, v in info.items() if k != "prompt_tokens"},
+        max_tokens=args.max_tokens, seed=args.seed,
+        mtp_acceptance=accepted["tokens"] / accepted["steps"] if accepted["steps"] else None, **{k: v for k, v in info.items() if k != "prompt_tokens"},
     )
     if args.workload == "multiturn":
         result.update(num_convs=args.num_convs, turns=args.turns)

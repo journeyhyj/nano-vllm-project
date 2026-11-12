@@ -11,7 +11,7 @@
 # enforce_eager. Noise floor: off again, every request submitted alone (other batch shapes, same arithmetic otherwise).
 # Sampling is argmax (also for MTP verification) and FLA autotuning is pinned, so differences come only from the cache.
 # For every request: identical tokens or not, the first differing position and the reference's top-1 / top-2 logit gap
-# there, and the largest |logit difference| over the positions up to it (first 32 positions are compared).
+# there (recorded at every position), and the largest |logit difference| up to it (full logits kept for the first 32).
 # Each configuration runs in its own process. Usage: python tests/test_prefix_cache_e2e.py   (needs a GPU; ~15 min)
 import json
 import os
@@ -86,7 +86,7 @@ def worker(name, out_path):
     model_runner_module.sample_from_probs = lambda probs: probs.argmax(dim=-1)
 
     # record the logits behind every generated token, and cached tokens at every admission
-    names, logits_of, admissions, preemptions, hit_then_preempted = {}, {}, {}, [0], []
+    names, logits_of, gaps_of, admissions, preemptions, hit_then_preempted = {}, {}, {}, {}, [0], []
     compute_logits, run, allocate, preempt = mr.model.compute_logits, mr.run, scheduler.block_manager.allocate, scheduler.preempt
     last = {}
     def recording_compute_logits(h):
@@ -102,6 +102,8 @@ def worker(name, out_path):
             rows = [logits[i]] if is_prefill else list(logits.view(len(seqs), q, -1)[i][:len(tokens[i])])
             for j, row in enumerate(rows):
                 pos = seq.num_completion_tokens + j
+                top2 = row.float().topk(2).values
+                gaps_of.setdefault(names[seq.seq_id], {})[pos] = (top2[0] - top2[1]).item()
                 if pos < NUM_LOGITS:
                     logits_of.setdefault(names[seq.seq_id], {})[pos] = row.to("cpu", torch.bfloat16)
         return result
@@ -150,7 +152,7 @@ def worker(name, out_path):
         hit_then_preempted.clear()
     result = dict(outputs=outputs, admissions=admissions, scenarios=report, stats=scheduler.block_manager.stats)
     if ref_name is None:
-        torch.save(dict(result, logits=logits_of), out_path)
+        torch.save(dict(result, logits=logits_of, gaps=gaps_of), out_path)
     else:
         ref = torch.load(out_path.replace(f"{name}.pt", f"{ref_name}.pt"))
         result["comparison"] = compare(ref, outputs, logits_of)
@@ -171,10 +173,7 @@ def compare(ref, outputs, logits_of):
             a, b = ref["logits"].get(rname, {}).get(i), logits_of.get(rname, {}).get(i)
             if a is not None and b is not None:
                 max_diff = max(max_diff, (a.float() - b.float()).abs().max().item())
-        gap = None
-        if first is not None and first < NUM_LOGITS and first in ref["logits"].get(rname, {}):
-            top2 = ref["logits"][rname][first].float().topk(2).values
-            gap = (top2[0] - top2[1]).item()
+        gap = ref["gaps"].get(rname, {}).get(first) if first is not None else None
         rows[rname] = dict(identical=first is None, first_diff=first, top2_gap=gap, max_logit_diff=max_diff, length=len(tokens))
     return rows
 
@@ -217,7 +216,7 @@ def main():
             # a cache hit may only change bf16 rounding: outputs may part at a near tie, never at a clear decision
             if r["max_logit_diff"] > 1.0:
                 failures.append(f"{name}/{rname}: logits differ by {r['max_logit_diff']:.3f}")
-            if not r["identical"] and r["top2_gap"] is not None and r["top2_gap"] > 0.5:
+            if not r["identical"] and (r["top2_gap"] is None or r["top2_gap"] > 0.5):
                 failures.append(f"{name}/{rname}: diverged at {r['first_diff']} where the top-2 gap is {r['top2_gap']:.3f}")
     preempts = {name: (res["scenarios"]["preempt"]["preemptions"], res["scenarios"]["preempt"]["hit_then_preempted"])
                 for name, res in results.items()}
@@ -225,7 +224,7 @@ def main():
     for name in ("branch", "all", "branch_mtp"):
         if not preempts[name][1]:
             failures.append(f"{name}: no request was preempted after a cache hit")
-    json.dump({k: {kk: vv for kk, vv in v.items() if kk != "logits"} for k, v in results.items()},
+    json.dump({k: {kk: vv for kk, vv in v.items() if kk not in ("logits", "gaps")} for k, v in results.items()},
               open(os.path.join(tmp, "summary.json"), "w"), indent=1, default=str)
     print(f"details: {tmp}/summary.json")
     for path in os.listdir(tmp):
