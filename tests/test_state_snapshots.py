@@ -195,6 +195,7 @@ def test_snapshots_and_restore(window):
     assert same(h.state(7), full_A)
     extra = sum(w[7] is not None and (len(w[7][0]) - (w[1] - w[0])) for w in plan)
     print(f"snapshot / restore, window {window}: bit-identical ({len(plan)} FLA calls, {extra} extra tokens)")
+    return len(plan), extra
 
 
 def test_conv_fallback():
@@ -227,8 +228,9 @@ if __name__ == "__main__":
     print(f"pinned {pin_fla_autotune()} FLA autotuners")
     test_window_plan()
     test_window_plan_fuzz()
-    for window in (8192, 2048, 1024):    # extra sequences only, extra sequences and cuts, cuts only
-        test_snapshots_and_restore(window)
+    # extra sequences only (8192), extra sequences and cuts (2048, 1024), cuts only (512)
+    plans = {window: test_snapshots_and_restore(window) for window in (8192, 2048, 1024, 512)}
+    assert plans[8192][0] == 1 and plans[512][1] == 0 and all(plans[w][1] for w in (2048, 1024))
     test_conv_fallback()
     test_batch_position_invariance()
     print("PASS")

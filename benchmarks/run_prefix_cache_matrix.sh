@@ -3,7 +3,8 @@
 # Usage: benchmarks/run_prefix_cache_matrix.sh <out dir> <policy>... ("-" = no --policy flag, i.e. the engine default;
 #        the baseline before hybrid prefix caching existed was run with "-")
 # Env: MODEL (default ~/huggingface/Qwen3.5-4B), GPU (default 0 = RTX 4090 at PCI 1A:00.0 with CUDA_DEVICE_ORDER=PCI_BUS_ID),
-#      REPEATS (default 2), ONLY (optional regex over run names), EXTRA (extra bench flags)
+#      REPEATS (default 2), R0 (number of the first repeat, default 1), ONLY (optional regex over run names),
+#      EXTRA (extra bench flags), PYTHONPATH (which engine checkout to import; recorded in each log header)
 set -euo pipefail
 OUT=$1; shift
 MODEL=${MODEL:-~/huggingface/Qwen3.5-4B}
@@ -31,12 +32,12 @@ for policy in "$@"; do
     if [[ -n "${ONLY:-}" && ! "$name" =~ $ONLY ]]; then continue; fi
     pflag=""; ptag="default"
     if [[ "$policy" != "-" ]]; then pflag="--policy $policy"; ptag=$policy; fi
-    for r in $(seq 1 "$REPEATS"); do
+    for r in $(seq "${R0:-1}" $(( ${R0:-1} + REPEATS - 1 ))); do
       tag="${name}_${ptag}_r${r}"
       cmd="python benchmarks/bench_prefix_cache.py $MODEL $flags $pflag ${EXTRA:-} --out $OUT/$tag.json"
       {
         echo "# $(date -Is) host=$(hostname) git=$(git rev-parse --short HEAD) loadavg=$(cut -d' ' -f1-3 /proc/loadavg)"
-        echo "# CUDA_DEVICE_ORDER=$CUDA_DEVICE_ORDER CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+        echo "# CUDA_DEVICE_ORDER=$CUDA_DEVICE_ORDER CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES PYTHONPATH=${PYTHONPATH:-}"
         nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null | sed 's/^/# gpu: /' || true
         echo "# $cmd"
       } > "$OUT/$tag.log"
