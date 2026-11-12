@@ -1,3 +1,5 @@
+import bisect
+import math
 import torch
 from torch import nn
 import triton
@@ -201,6 +203,7 @@ class LinearAttention(nn.Module):
         self.conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
         self.scale = head_k_dim ** -0.5
         self.conv_state = self.ssm_state = torch.tensor([])
+        self.conv_snap = self.ssm_snap = torch.tensor([])    # snapshot pool for prefix caching (views set by ModelRunner)
 
     def forward(self, mixed_qkv: torch.Tensor, conv_weight: torch.Tensor, g: torch.Tensor, beta: torch.Tensor):
         context = get_context()
@@ -231,10 +234,21 @@ class LinearAttention(nn.Module):
                 x, x.stride(0), g, beta, o, ssm_state, context.state_slots, self.scale,
                 Hk=self.num_k_heads, Hv=self.num_v_heads, K=self.head_k_dim, V=self.head_v_dim, BV=BV, DECODE_LEN=decode_len)
         else:
+            if context.conv_snapshots is not None:    # before the live conv states are overwritten below
+                self.save_conv_snapshots(mixed_qkv, conv_state, context.conv_snapshots)
             conv_state_update_kernel[(triton.cdiv(C, BLOCK_C), num_seqs)](
                 mixed_qkv, mixed_qkv.stride(0), conv_state, *conv_args, BLOCK_C=BLOCK_C)
             o = self.chunk_gated_delta_rule(x, g, beta, ssm_state, context)
         return o
+
+    def save_conv_snapshots(self, mixed_qkv: torch.Tensor, conv_state: torch.Tensor, conv_snapshots):
+        # the conv state at a block boundary b is the 3 raw inputs before b: rows of this batch, or, when the chunk starts
+        # less than 3 tokens before b, partly the sequence's previous conv state
+        rows, ids, fallback = conv_snapshots
+        if ids.numel():
+            self.conv_snap[ids] = mixed_qkv[rows].view(ids.numel(), self.conv_kernel_size - 1, -1)
+        for sid, slot, sources in fallback:
+            self.conv_snap[sid] = torch.stack([conv_state[slot, i] if old else mixed_qkv[i] for old, i in sources])
 
     def chunk_gated_delta_rule(self, x: torch.Tensor, g: torch.Tensor, beta: torch.Tensor, ssm_state: torch.Tensor, context):
         # FLA works on dense per-sequence states: gather this batch's states from the slot pool, run FLA window by window
@@ -242,7 +256,7 @@ class LinearAttention(nn.Module):
         Hk, Hv, K, V = self.num_k_heads, self.num_v_heads, self.head_k_dim, self.head_v_dim
         state = ssm_state[context.state_slots] * context.has_initial_state.view(-1, 1, 1, 1)    # zero for new sequences
         o = x.new_empty(x.size(0), Hv, V)
-        for start, end, first, last, cu_seqlens, cu_seqlens_cpu in context.fla_windows:
+        for start, end, first, last, cu_seqlens, cu_seqlens_cpu, snapshots in context.fla_windows:
             q, k, v = x[start:end].split([Hk * K, Hk * K, Hv * V], dim=-1)
             q = q.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)    # FLA needs one q/k head per value head
             k = k.reshape(1, end - start, Hk, K).repeat_interleave(Hv // Hk, dim=2)
@@ -252,24 +266,59 @@ class LinearAttention(nn.Module):
                 output_final_state=True, use_qk_l2norm_in_kernel=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu)
             o[start:end] = o_window[0]
             state[first:last] = final_state
+            if snapshots is not None:    # these sequences end this window exactly at a block boundary
+                index, ids = snapshots
+                self.ssm_snap[ids] = final_state[index]
         ssm_state[context.state_slots] = state
         return o
 
 
-def plan_fla_windows(cu_seqlens: list[int], window: int = 8192):
+def plan_fla_windows(cu_seqlens: list[int], window: int = 8192, snapshots=(), align: int = 64):
     """Cut a prefill batch into windows of at most `window` tokens for FLA, whose intermediates grow with the tokens
-    per call (~64 KB per token for Qwen3.5-4B). Each window is (start, end, first, last, cu_seqlens, cu_seqlens_cpu):
-    sequences first..last-1 overlap tokens [start, end), and cu_seqlens are their bounds inside the window (int64,
-    as FLA takes them; the CPU copy spares it a device-to-host sync)."""
+    per call (~64 KB per token for Qwen3.5-4B). Each window is (start, end, first, last, cu_seqlens, cu_seqlens_cpu,
+    snapshots): sequences first..last-1 overlap tokens [start, end), and cu_seqlens are their bounds inside the window
+    (int64, as FLA takes them; the CPU copy spares it a device-to-host sync).
+
+    A window that ends inside a sequence ends a multiple of `align` tokens after that sequence's start: FLA splits every
+    sequence into 64-token chunks from its start, so such a cut leaves the arithmetic unchanged (bit for bit) and the
+    result does not depend on where the sequence sits in the batch.
+    snapshots: (sequence index, row, snapshot id) with cu_seqlens[i] < row <= cu_seqlens[i + 1]. A window also ends at
+    each row, so the sequence's final state in that window is its state at the row; the window then carries
+    (indices into its final states, snapshot ids) as a pair of CUDA tensors, else None."""
+    total = cu_seqlens[-1]
+    align = math.gcd(window, align)
+    ends = set()
+    pos, j = 0, 0
+    while pos < total:
+        end = pos + window
+        if end < total:
+            while cu_seqlens[j + 1] <= end:
+                j += 1
+            end = cu_seqlens[j] + (end - cu_seqlens[j]) // align * align
+        else:
+            end = total
+        ends.add(end)
+        pos = end
+    ends.update(row for i, row, _ in snapshots if row < cu_seqlens[i + 1])    # rows at a sequence end need no cut
+    ends = sorted(ends)
+    per_window = [[] for _ in ends]
+    for i, row, sid in snapshots:
+        per_window[bisect.bisect_left(ends, row)].append((i, sid))
     windows = []
-    first = 0
-    for start in range(0, cu_seqlens[-1], window):
-        end = min(start + window, cu_seqlens[-1])
+    first, start = 0, 0
+    for end, snaps in zip(ends, per_window):
         while cu_seqlens[first + 1] <= start:
             first += 1
         last = first + 1
         while last < len(cu_seqlens) - 1 and cu_seqlens[last] < end:
             last += 1
         bounds = torch.tensor([0] + [min(c, end) - start for c in cu_seqlens[first + 1:last + 1]], dtype=torch.int64, device="cpu")
-        windows.append((start, end, first, last, bounds.pin_memory().cuda(non_blocking=True), bounds))
+        if snaps:
+            assert all(first <= i < last for i, _ in snaps)
+            snaps = torch.tensor([[i - first for i, _ in snaps], [sid for _, sid in snaps]], dtype=torch.int64, device="cpu")
+            snaps = tuple(snaps.pin_memory().cuda(non_blocking=True))
+        else:
+            snaps = None
+        windows.append((start, end, first, last, bounds.pin_memory().cuda(non_blocking=True), bounds, snaps))
+        start = end
     return windows

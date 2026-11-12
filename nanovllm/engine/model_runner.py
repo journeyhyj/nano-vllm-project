@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import torch
 import torch.distributed as dist
@@ -29,8 +30,10 @@ class ModelRunner:
         self.query_len = 1 + self.num_speculative_tokens    # tokens per sequence in a decode step
         self.draft_probs = None
         self.mtp_graphs = {}
+        self.snapshot_bytes = 0
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        port = os.environ.get("NANOVLLM_PORT", "2333")    # set it to run several engines on one host
+        dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
@@ -135,6 +138,9 @@ class ModelRunner:
         available = int(total * config.gpu_memory_utilization - used - peak + current)
         if self.linear_attn_layers:
             available -= self.allocate_state_cache(available)
+            available -= self.allocate_snapshot_pool(available)
+        else:
+            config.num_state_snapshots = 0
         attn_layers = [m for m in self.model.modules() if hasattr(m, "k_cache") and hasattr(m, "v_cache")]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
@@ -150,23 +156,47 @@ class ModelRunner:
         # every running sequence owns a group of query_len recurrent-state slots in each linear-attention layer
         # (one per token verified in a decode step) plus, with MTP, the probabilities of its pending draft.
         # States use at most half of the budget; the extra group absorbs CUDA-graph padding.
+        # Each pool is one [layers, slots, ...] tensor and every layer works on its own view, so copying states between
+        # slots and snapshots (prefix caching) takes one copy per pool instead of one per layer.
         config = self.config
-        slot_bytes = sum(
-            (m.conv_kernel_size - 1) * m.conv_dim * config.hf_config.dtype.itemsize
-            + m.num_v_heads * m.head_k_dim * m.head_v_dim * 4
-            for m in self.linear_attn_layers
-        )
-        group_bytes = self.query_len * slot_bytes + self.num_speculative_tokens * self.draft_vocab_size * 4
+        m = self.linear_attn_layers[0]
+        self.conv_shape = (m.conv_kernel_size - 1, m.conv_dim)
+        self.ssm_shape = (m.num_v_heads, m.head_k_dim, m.head_v_dim)
+        assert all((l.conv_kernel_size - 1, l.conv_dim) == self.conv_shape and (l.num_v_heads, l.head_k_dim, l.head_v_dim) == self.ssm_shape
+                   for l in self.linear_attn_layers)
+        self.state_bytes = len(self.linear_attn_layers) * (
+            self.conv_shape[0] * self.conv_shape[1] * config.hf_config.dtype.itemsize
+            + self.ssm_shape[0] * self.ssm_shape[1] * self.ssm_shape[2] * 4)    # one slot (or snapshot) across all layers
+        group_bytes = self.query_len * self.state_bytes + self.num_speculative_tokens * self.draft_vocab_size * 4
         num_groups = min(config.max_num_seqs, available // 2 // group_bytes - 1)
         assert num_groups > 0
         config.max_num_seqs = config.num_state_groups = num_groups
         num_slots = (num_groups + 1) * self.query_len
-        for m in self.linear_attn_layers:
-            m.conv_state = torch.zeros(num_slots, m.conv_kernel_size - 1, m.conv_dim)
-            m.ssm_state = torch.zeros(num_slots, m.num_v_heads, m.head_k_dim, m.head_v_dim, dtype=torch.float32)
+        num_layers = len(self.linear_attn_layers)
+        self.conv_pool = torch.zeros(num_layers, num_slots, *self.conv_shape)
+        self.ssm_pool = torch.zeros(num_layers, num_slots, *self.ssm_shape, dtype=torch.float32)
+        for i, m in enumerate(self.linear_attn_layers):
+            m.conv_state, m.ssm_state = self.conv_pool[i], self.ssm_pool[i]
         if self.num_speculative_tokens:
             self.draft_probs = torch.zeros(num_groups + 1, self.draft_vocab_size, dtype=torch.float32)
         return (num_groups + 1) * group_bytes
+
+    def allocate_snapshot_pool(self, available: int) -> int:
+        # prefix caching on a hybrid model: recurrent states of all linear-attention layers at chosen block boundaries
+        config = self.config
+        num_snapshots = config.num_state_snapshots
+        if config.prefix_cache_policy not in ("last", "branch", "all"):
+            num_snapshots = 0
+        elif num_snapshots < 0:
+            num_snapshots = min(64, available // 4 // self.state_bytes)
+        config.num_state_snapshots = num_snapshots
+        num_layers = len(self.linear_attn_layers)
+        self.conv_snap = torch.zeros(num_layers, num_snapshots, *self.conv_shape)
+        self.ssm_snap = torch.zeros(num_layers, num_snapshots, *self.ssm_shape, dtype=torch.float32)
+        for i, m in enumerate(self.linear_attn_layers):
+            m.conv_snap, m.ssm_snap = self.conv_snap[i], self.ssm_snap[i]
+        self.snapshot_bytes = num_snapshots * self.state_bytes
+        return self.snapshot_bytes
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
@@ -183,13 +213,18 @@ class ModelRunner:
         max_seqlen_k = 0
         slot_mapping = []
         block_tables = None
-        for seq in seqs:
+        restores = []     # (snapshot id, current state slot)
+        snapshots = []    # (sequence index, row of the block boundary, snapshot id)
+        for i, seq in enumerate(seqs):
             start = seq.num_cached_tokens
             seqlen_q = seq.num_scheduled_tokens
             end = start + seqlen_q
             seqlen_k = end
             input_ids.extend(seq[start:end])
             positions.extend(range(start, end))
+            snapshots.extend((i, cu_seqlens_q[-1] + b - start, sid) for b, sid, _ in seq.snapshot_saves)
+            if seq.snapshot_restore != -1:
+                restores.append((seq.snapshot_restore, seq.state_slots[-1]))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
@@ -206,24 +241,71 @@ class ModelRunner:
                     slot_end = seq.block_table[i] * self.block_size + self.block_size
                 else:
                     slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
-                slot_mapping.extend(range(slot_start, slot_end))
+                if (i + 1) * self.block_size <= seq.num_shared_kv_tokens:    # kv_only: shared block, already holds this KV
+                    slot_mapping.extend([-1] * (slot_end - slot_start))
+                else:
+                    slot_mapping.extend(range(slot_start, slot_end))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
-        state_slots = has_initial_state = fla_windows = None
+        state_slots = has_initial_state = fla_windows = conv_snapshots = None
         if self.linear_attn_layers:
             state_slots = self.prepare_state_slots(seqs, is_prefill=True)
-            # with prefix caching off, cached tokens only exist after an earlier chunk of this sequence
+            # cached tokens come from an earlier chunk of this sequence or from a prefix-cache hit, whose state is
+            # restored from its snapshot into the sequence's current slot right here
             has_initial_state = [seq.num_cached_tokens > 0 for seq in seqs]
             has_initial_state = torch.tensor(has_initial_state, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-            fla_windows = plan_fla_windows(cu_seqlens_q)    # shared by all linear attention layers of this step
+            if restores:
+                self.copy_states(*zip(*restores), to_snapshots=False)
+            # shared by all linear attention layers of this step
+            fla_windows = plan_fla_windows(cu_seqlens_q, snapshots=snapshots)
+            if snapshots:
+                conv_snapshots = self.prepare_conv_snapshots(seqs, cu_seqlens_q, snapshots)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, state_slots,
-                    has_initial_state, fla_windows=fla_windows)
+                    has_initial_state, fla_windows=fla_windows, conv_snapshots=conv_snapshots)
         return input_ids, positions
+
+    def prepare_conv_snapshots(self, seqs: list[Sequence], cu_seqlens_q: list[int], snapshots: list[tuple[int, int, int]]):
+        # the conv state at boundary row r is input rows r-3..r-1; rows before the chunk come from the previous conv state
+        width = self.conv_shape[0]
+        rows, ids, fallback = [], [], []
+        for i, row, sid in snapshots:
+            if row - width >= cu_seqlens_q[i]:
+                rows.extend(range(row - width, row))
+                ids.append(sid)
+            else:
+                sources = [(r < cu_seqlens_q[i], r - cu_seqlens_q[i] + width if r < cu_seqlens_q[i] else r) for r in range(row - width, row)]
+                fallback.append((sid, seqs[i].state_slots[-1], sources))
+        rows = torch.tensor(rows, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        ids = torch.tensor(ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        return rows, ids, fallback
+
+    def copy_states(self, src: list[int], dst: list[int], to_snapshots: bool):
+        # recurrent states of all linear-attention layers: snapshot -> slot (restore) or slot -> snapshot
+        src = torch.tensor(src, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        dst = torch.tensor(dst, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        if to_snapshots:
+            self.conv_snap[:, dst] = self.conv_pool[:, src]
+            self.ssm_snap[:, dst] = self.ssm_pool[:, src]
+        else:
+            self.conv_pool[:, dst] = self.conv_snap[:, src]
+            self.ssm_pool[:, dst] = self.ssm_snap[:, src]
+
+    def save_decode_snapshots(self, seqs: list[Sequence]):
+        # a decode step crossed a block boundary b: the state after token b-1 is in slot b-1-start of the sequence's
+        # group (each verified token has its own slot). Copied whether or not that token gets accepted: the scheduler
+        # only registers the snapshot if it was.
+        src, dst = [], []
+        for seq in seqs:
+            for b, sid, _ in seq.snapshot_saves:
+                src.append(seq.state_slots[b - 1 - seq.num_cached_tokens])
+                dst.append(sid)
+        if dst:
+            self.copy_states(src, dst, to_snapshots=True)
 
     def prepare_decode(self, seqs: list[Sequence]):
         input_ids = []
@@ -310,6 +392,8 @@ class ModelRunner:
             output = self.run_speculative(seqs, is_prefill, positions, hidden_states, logits, temperatures)
         else:
             output = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        if not is_prefill and self.snapshot_bytes:
+            self.save_decode_snapshots(seqs)
         reset_context()
         return output
 
