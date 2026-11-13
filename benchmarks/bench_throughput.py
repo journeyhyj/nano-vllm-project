@@ -133,7 +133,7 @@ def main():
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), cuda_device_order=os.environ.get("CUDA_DEVICE_ORDER"),
         nanovllm_path=d, git=git, git_dirty=dirty, loadavg_before=load_before, loadavg_after=os.getloadavg(),
         args=vars(args), max_num_seqs_effective=cfg.max_num_seqs, num_kvcache_blocks=cfg.num_kvcache_blocks,
-        prefill_graph_tokens=cfg.prefill_graph_tokens,
+        prefill_graph_tokens=getattr(cfg, "prefill_graph_tokens", None),
         results=results,
     )
     if args.out:

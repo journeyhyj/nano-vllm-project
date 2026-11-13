@@ -262,7 +262,7 @@ def main():
                nanovllm_path=os.path.dirname(nanovllm.__file__), loadavg_before=os.getloadavg(),
                engine=dict(max_model_len=args.max_model_len, max_num_seqs=16,
                            gpu_memory_utilization=args.gpu_memory_utilization, prefix_cache_policy="off",
-                           prefill_graph_tokens=llm.model_runner.config.prefill_graph_tokens))
+                           prefill_graph_tokens=getattr(llm.model_runner.config, "prefill_graph_tokens", None)))
     try:
         d = os.path.dirname(nanovllm.__file__)
         res["git"] = subprocess.check_output(["git", "-C", d, "rev-parse", "--short", "HEAD"], text=True).strip()
