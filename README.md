@@ -1,6 +1,6 @@
 # nano-vllm：Qwen3.5 混合架构推理 + MTP 投机解码
 
-本项目基于 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)（一个约 1200 行 Python 的 vLLM 极简实现）。在保留原有功能（paged KV cache、prefix caching、chunked prefill、CUDA Graph、张量并行）的基础上，新增了下面四项：
+本项目基于 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)（一个约 1200 行 Python 的 vLLM 极简实现）。在保留原有功能（paged KV cache、prefix caching、chunked prefill、CUDA Graph、张量并行）的基础上，新增了下面五项：
 
 | 功能 | 一句话说明 |
 |---|---|
@@ -8,6 +8,7 @@
 | **MTP 投机解码** | 用模型自带的 MTP 头起草 token，再由目标模型一次验证；拒绝采样保证输出分布与目标模型一致 |
 | **小词表起草** | 起草时 lm_head 只计算 32K 个高频 token，这部分耗时降为原来的约 1/7，输出依然无损 |
 | **FLA prefill** | 线性注意力的 prefill 改用 flash-linear-attention 的 chunk kernel，长 prompt 的 prefill 快 1.26–1.31× |
+| **混合模型的 prefix caching** | 在 block 边界保存 Gated DeltaNet 的状态快照，命中时与 KV 一起恢复。共享 8000 token system prompt 时，TTFT p50 从 494 ms 降到 106 ms |
 
 ## 结果
 
@@ -40,6 +41,31 @@
 - Qwen3.5 只有 1/4 的层是全注意力层，所以接入 FLA 后，长 prompt 的 prefill 比同尺寸的 Qwen3-4B 还快。
 - 1K × 8 这种多条短 prompt 的场景，原来的 kernel 并行度已经够了，所以基本没有收益。
 
+### Prefix caching：共享 system prompt 与多轮对话
+
+测试条件：
+- RTX 4090，在线到达，TTFT 从请求到达时开始计时；`max_num_seqs=16`，`max_num_batched_tokens=16384`。
+- 共享负载：64 个请求，按泊松过程到达。每个请求都是同一段 N token 的共享前缀（chat 模板 + system prompt）加一道 MT-Bench 问题，最多生成 128 个 token。
+- 多轮对话：16 段对话 × 6 轮，每轮在上一轮结束后立即发出，最多生成 256 个 token。
+- "改动前"是加入本功能之前的引擎（c5af84b），当时混合模型不做 prefix caching。
+- "branch" 是默认策略。benchmark 中把快照池设为 48 份（2358 MiB，`--num-state-snapshots 48`）；默认的自动大小没有测过。
+
+| 负载 | QPS | 改动前 TTFT p50 / p99 | branch TTFT p50 / p99 | p50 加速 | 命中率 |
+|---|---|---|---|---|---|
+| 共享 2000 token | 4 | 148 / 1094 ms | 106 / 209 ms | 1.39× | 83.5% |
+| 共享 4000 token | 2 | 251 / 673 ms | 111 / 261 ms | 2.26× | 91.2% |
+| 共享 8000 token | 1 | 494 / 1372 ms | 106 / 539 ms | 4.64× | 95.1% |
+| 多轮对话 | 0.5 段/s | 184 / 415 ms | 101 / 188 ms | 1.82× | 78.1% |
+
+说明：
+- 每格是 2 次运行的平均。
+- 命中后的 TTFT p50 在 101–113 ms。单个请求时，64 token prompt 的一步 prefill 也要 93–96 ms，这是命中后的下限，它的构成没有分解。所以前缀越长，加速越明显。
+- 8000 token 时的 p99 来自最早的两个请求：branch 要第三次遇到同一个前缀才命中，前两个请求都得完整 prefill。
+- 只共享 KV、GDN 全部重算（kv_only）时，TTFT 与不开 cache 相同。
+- 开启 MTP 时同样有效（各 1 次运行）：共享 4000 token、QPS 2 下，p50 从 261 ms 降到 112 ms，接受率都是 0.810。
+
+全部策略、各次运行的范围、开销分解以及没有收益的设计，见 [docs/hybrid_prefix_cache.md](docs/hybrid_prefix_cache.md)。原始 JSON 和日志在 `benchmarks/results/`，汇总表是 `benchmarks/results/summary.md`。
+
 ## 设计要点
 
 ### 1. 混合架构的状态管理
@@ -50,7 +76,7 @@ Qwen3.5-4B 共 32 层，其中 24 层是 Gated DeltaNet，8 层是全注意力�
 
 具体实现：
 - **状态槽位池**：在 KV cache 之前分配，最多占用剩余显存的一半。`BlockManager` 在给序列分配 KV block 时同时分配一个槽位；序列结束或被抢占时归还。
-- **prefix caching 对混合模型关闭**：缓存住的 KV block 无法还原出递归状态。
+- **prefix caching**：缓存住的 KV block 无法还原出递归状态，所以另外在 block 边界保存状态快照（见第 5 节）。
 - **CUDA Graph**：`state_slots` 是图里的静态 buffer；为了凑齐 batch 而填充的条目，都指向一个备用槽位，不会改动任何真实序列的状态。
 - **Kernel**：causal conv1d 和状态更新是自己写的 Triton kernel。delta rule 的递推在 prefill 时调用 FLA，在 decode 时用自己写的 kernel（原因见第 4 节）。
 
@@ -95,6 +121,26 @@ Qwen3.5-4B 共 32 层，其中 24 层是 Gated DeltaNet，8 层是全注意力�
 - **显存**：FLA 的中间张量每个 token 约占 64 KB。不加处理的话，预热时一次处理 16K 个 token，峰值多出 1.04 GiB，开启 MTP 时的最大并发会从 19 降到 14。现在把一次 prefill 切成最多 8192 个 token 的窗口，序列的状态在窗口之间接力，结果严格等价；额外显存降到 0.44 GiB，最大并发为 17。
 - **decode 仍用自己的 kernel**：FLA 公开的 decode 接口不能按槽位原地更新状态，也不输出每个 token 之后的中间状态，没法支持投机解码的回滚。vLLM 也是自己维护了一份改过的 FLA。
 
+### 5. 混合模型的 prefix caching
+
+- **为什么只复用 KV 不够**：第 l 层 GDN 在前缀末尾的状态，取决于前缀每个 token 在前面所有层的输出。所以要得到它，只能把整个前缀在整个网络里重算一遍。实测只共享 KV 时 TTFT 不变。
+- **快照**：在 256 token 的 block 边界处，保存 24 层 GDN 的 conv 状态和 SSM 状态，每份 49.125 MiB，约等于 6 个 KV block。
+  - 快照放在一个固定大小的池里，从 KV cache 的显存预算中扣除；
+  - 以边界前那个 block 的链式 hash 为 key，前缀匹配时顺带查找；
+  - 命中最深的那个快照后，前面的 KV block 直接共享，快照拷进序列自己的状态槽，只 prefill 剩下的部分。
+- **什么时候存**（`prefix_cache_policy`）：
+  - `branch`（默认）：只在某个前缀第二次被走到时，在 KV 匹配的末端存一份，从第三次开始命中；
+  - `last`：每个请求存在最后一个完整 block 的边界；
+  - `all`：每个边界都存。
+  - 三种策略都会在 decode 越过边界时存一份快照，供多轮对话的下一轮使用。
+  - 池满时淘汰 LRU 中没有被 pin 的快照。
+- **prefill 中怎样拿到边界处的状态**：
+  - FLA 只输出每条序列的最终状态。最直接的做法是在边界处切开窗口，但每切一刀，每层就多一次 FLA 调用，而单次调用的 host 时间约 0.9 ms，与 token 数无关。实测 all 策略（2064 token 的 prompt 存 8 份快照）下，未命中的 prefill 从 134.9 ms 变成 574.6 ms。
+  - 现在的做法是把"序列起点 → 边界"这段 token 作为一条额外的序列，追加进同一次 FLA 调用，它的最终状态就是快照。这样调用次数不变，结果与切开逐位相同；同样的 prefill 降到 222.7 ms（其中还剩一次回退切开）。
+  - 放不下时（总 token 数超过 warmup 跑过的最大调用）退回切开。
+- **decode 中保存**：MTP 验证 kernel 本来就会写出每个 token 之后的状态，越过边界时直接拷贝；草稿被拒绝时这份快照作废。
+- **兼容性**：支持 chunked prefill、抢占（重新接纳后可以再次命中）、CUDA Graph 和 MTP。端到端测试中，贪心输出只在 bf16 近似平局处分叉（top-2 logit 差 ≤ 0.125）；在前 32 个生成位置内，最大 logit 误差 0.63，小于只改变 batch 组成时的 0.69。
+
 ## 使用
 
 ```bash
@@ -109,6 +155,12 @@ llm = LLM("~/huggingface/Qwen3.5-4B",
           draft_vocab="assets/qwen3_5_draft_vocab_32k.json")       # 可选：小词表起草
 outputs = llm.generate(["Hello, Nano-vLLM."], SamplingParams(temperature=0.7, max_tokens=256))
 ```
+
+混合模型的 prefix caching 默认开启，有两个参数：
+- `prefix_cache_policy`：`"branch"`（默认）、`"last"`、`"all"`；另有两个对照组，`"kv_only"`（只共享 KV）和 `"off"`。
+- `num_state_snapshots`：快照池的大小。默认 −1，表示取 64 和"剩余显存的 25% 能放下的份数"中较小的一个。
+
+例如 `LLM(path, prefix_cache_policy="branch", num_state_snapshots=48)`。
 
 `assets/qwen3_5_draft_vocab_32k.json` 适用于整个 Qwen3.5 系列（它们共用同一个 tokenizer）。如果要为其他模型或数据重新生成：
 
@@ -133,7 +185,21 @@ python benchmarks/bench_spec.py ~/huggingface/Qwen3.5-4B question.jsonl --k 1 --
 
 # prefill 耗时
 python benchmarks/bench_prefill.py ~/huggingface/Qwen3.5-4B --len 8192 --bs 1
+
+# prefix caching：单测与端到端测试（与 off 逐 token 对比，覆盖命中、命中后被抢占、MTP、关闭 CUDA Graph）
+python tests/test_snapshot_pool.py
+python tests/test_state_snapshots.py
+python tests/test_prefix_cache_e2e.py
+
+# prefix caching：在线负载矩阵、单请求开销、FLA 调用开销，以及汇总
+# （结果目录里用 git worktree 冻结了每个引擎版本，并用 PYTHONPATH 指定，见 benchmarks/results/README.md）
+EXTRA="--num-state-snapshots 48" benchmarks/run_prefix_cache_matrix.sh benchmarks/results/mine branch off
+benchmarks/run_snapshot_overhead.sh benchmarks/results/mine_overhead off last branch all
+python benchmarks/bench_fla_calls.py
+python benchmarks/summarize_prefix_cache.py benchmarks/results/baseline benchmarks/results/mine
 ```
+
+`bench_prefix_cache.py` 默认从 `/data/csd/nano-vllm-data/mt_bench_question.jsonl` 读 MT-Bench 问题，可以用 `--questions question.jsonl` 换成上面下载的文件。
 
 开发过程中还做过以下检查：
 - **与 HF transformers 逐 token 对比**：贪心输出只在 bf16 近似平局处分叉（这些位置前两名的 logit 差 ≤ 0.25）；
@@ -143,7 +209,14 @@ python benchmarks/bench_prefill.py ~/huggingface/Qwen3.5-4B --len 8192 --bs 1
 ## 局限
 
 - MTP 每步只起草 1 个 token，只支持单卡，只支持温度采样（不支持 top-p / top-k）。
-- Qwen3.5 还不支持张量并行；混合模型不支持 prefix caching。
+- Qwen3.5 还不支持张量并行。
+- 混合模型的 prefix caching：
+  - 命中后的 TTFT 不会低于一步 prefill 的固定开销（单个请求时 93–96 ms）；
+  - `branch` 要第三次遇到同一前缀才命中；
+  - 同一步被接纳的请求互相用不上对方的快照；
+  - 长 prompt 上保存快照会退回到切开 FLA 窗口；
+  - 只在 Qwen3.5-4B、单卡上测过。
+  - 详见 [docs/hybrid_prefix_cache.md](docs/hybrid_prefix_cache.md) 第 5 节。
 - SSM 状态用 fp32 存储，开启 MTP 后每条序列要占两份。所以在 24 GB 显卡上，开启 MTP 的最大并发约为不开时的一半。
 
 ## 致谢

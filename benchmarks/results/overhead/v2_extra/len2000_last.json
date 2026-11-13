@@ -1,0 +1,62 @@
+{
+ "policy": "last",
+ "len": 2000,
+ "tail": 64,
+ "repeats": 5,
+ "miss_prefill_ms": 148.03957217372954,
+ "miss_all_ms": [
+  148.3438580762595,
+  148.18536001257598,
+  148.03957217372954,
+  147.83329609781504,
+  148.0053949635476
+ ],
+ "hit_prefill_ms": 93.20042002946138,
+ "hit_all_ms": [
+  93.20042002946138,
+  94.08093895763159,
+  93.15076190978289,
+  92.98642096109688,
+  93.39216817170382
+ ],
+ "hit_cached_tokens": [
+  2048,
+  2048,
+  2048,
+  2048,
+  2048
+ ],
+ "short_prefill_ms": 93.74550101347268,
+ "short_all_ms": [
+  93.7876298557967,
+  93.52558688260615,
+  93.47142605111003,
+  93.74550101347268,
+  93.7678599730134
+ ],
+ "snapshot_restore_copy_ms": 0.32972800731658936,
+ "snapshot_bytes_each": 51511296,
+ "num_state_snapshots": 48,
+ "num_kvcache_blocks": 845,
+ "stats": {
+  "admissions": 28,
+  "prompt_tokens": 45728,
+  "matched_tokens": 20480,
+  "hit_tokens": 20480,
+  "policy": "last",
+  "saved": 12,
+  "restored": 10,
+  "evicted": 0,
+  "dropped_with_block": 0,
+  "duplicate": 0,
+  "unused": 0,
+  "skipped_full": 0,
+  "peak_in_use": 12,
+  "capacity": 48,
+  "in_use": 12
+ },
+ "gpu": "NVIDIA GeForce RTX 4090",
+ "cuda_visible_devices": "0",
+ "nanovllm_path": "/data/csd/nano-vllm-v2/nanovllm",
+ "git": "40a3ccf"
+}

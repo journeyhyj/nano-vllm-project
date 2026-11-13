@@ -1,0 +1,52 @@
+{
+ "policy": "off",
+ "len": 2000,
+ "tail": 64,
+ "repeats": 5,
+ "miss_prefill_ms": 134.63166286237538,
+ "miss_all_ms": [
+  135.32496290281415,
+  134.71129001118243,
+  134.63166286237538,
+  134.62635804899037,
+  134.47640789672732
+ ],
+ "hit_prefill_ms": 134.525140048936,
+ "hit_all_ms": [
+  134.525140048936,
+  134.4693440478295,
+  134.4583339523524,
+  134.52728814445436,
+  134.54506802372634
+ ],
+ "hit_cached_tokens": [
+  0,
+  0,
+  0,
+  0,
+  0
+ ],
+ "short_prefill_ms": 92.8013080265373,
+ "short_all_ms": [
+  92.35556307248771,
+  92.86954184062779,
+  92.35345711931586,
+  92.8013080265373,
+  93.08368898928165
+ ],
+ "snapshot_restore_copy_ms": null,
+ "snapshot_bytes_each": 51511296,
+ "num_state_snapshots": 0,
+ "num_kvcache_blocks": 1139,
+ "stats": {
+  "admissions": 28,
+  "prompt_tokens": 45728,
+  "matched_tokens": 0,
+  "hit_tokens": 0,
+  "policy": "off"
+ },
+ "gpu": "NVIDIA GeForce RTX 4090",
+ "cuda_visible_devices": "0",
+ "nanovllm_path": "/data/csd/nano-vllm-v2/nanovllm",
+ "git": "40a3ccf"
+}

@@ -1,0 +1,943 @@
+{
+ "workload": "multiturn",
+ "prefix": 2000,
+ "qps": 0.5,
+ "policy": "last",
+ "requests": 96,
+ "wall_s": 48.08783452399075,
+ "ttft_p50_ms": 101.10021708533168,
+ "ttft_p99_ms": 181.5027231284637,
+ "ttft_mean_ms": 111.45444510268322,
+ "ttft_later_p50_ms": 100.20677151624113,
+ "ttft_later_p99_ms": 105.71298513561486,
+ "prompt_tokens": 271242,
+ "prefill_tokens_computed": 50570,
+ "hit_tokens_first_admission": 220672,
+ "hit_rate": 0.8135613216242322,
+ "readmissions": 0,
+ "readmission_hit_tokens": 0,
+ "output_tokens": 20295,
+ "output_tok_per_s": 422.0402145551998,
+ "req_per_s": 1.9963469128996887,
+ "num_kvcache_blocks": 882,
+ "num_state_groups": 16,
+ "max_num_seqs": 16,
+ "snapshot_bytes": 2472542208,
+ "num_state_snapshots": 48,
+ "prefix_cache_stats": {
+  "admissions": 133,
+  "prompt_tokens": 326341,
+  "matched_tokens": 220928,
+  "hit_tokens": 220672,
+  "policy": "last",
+  "saved": 159,
+  "restored": 80,
+  "evicted": 111,
+  "dropped_with_block": 0,
+  "duplicate": 0,
+  "unused": 0,
+  "skipped_full": 0,
+  "peak_in_use": 48,
+  "capacity": 48,
+  "in_use": 48
+ },
+ "engine": {
+  "max_num_seqs": 16,
+  "max_num_batched_tokens": 16384,
+  "max_model_len": 10240,
+  "gpu_memory_utilization": 0.85,
+  "num_speculative_tokens": 0,
+  "draft_vocab": null,
+  "enforce_eager": false,
+  "prefix_cache_policy": "last",
+  "num_state_snapshots": 48,
+  "kvcache_block_size": 256
+ },
+ "gpu": "NVIDIA GeForce RTX 4090",
+ "torch": "2.6.0+cu124",
+ "cuda_visible_devices": "0",
+ "cuda_device_order": "PCI_BUS_ID",
+ "loadavg_before": [
+  1.4619140625,
+  1.46435546875,
+  1.6328125
+ ],
+ "loadavg_after": [
+  1.4541015625,
+  1.482421875,
+  1.62548828125
+ ],
+ "git": "40a3ccf",
+ "nanovllm_path": "/data/csd/nano-vllm-v2/nanovllm",
+ "max_tokens": 256,
+ "seed": 0,
+ "mtp_acceptance": null,
+ "num_convs": 16,
+ "turns": 6,
+ "per_request": [
+  {
+   "arrival": 0.0,
+   "first": 0.15628657792694867,
+   "finish": 1.1168953638989478,
+   "prompt_len": 2222,
+   "turn": 1,
+   "conv": 0,
+   "output_len": 91
+  },
+  {
+   "arrival": 1.1168953638989478,
+   "first": 1.2197109980043024,
+   "finish": 3.9412889098748565,
+   "prompt_len": 2348,
+   "turn": 2,
+   "conv": 0,
+   "output_len": 256
+  },
+  {
+   "arrival": 3.9412889098748565,
+   "first": 4.0457178498618305,
+   "finish": 6.928569674026221,
+   "prompt_len": 2645,
+   "turn": 3,
+   "conv": 0,
+   "output_len": 256
+  },
+  {
+   "arrival": 6.639523066730149,
+   "first": 6.789243608945981,
+   "finish": 10.156477194977924,
+   "prompt_len": 2049,
+   "turn": 1,
+   "conv": 1,
+   "output_len": 256
+  },
+  {
+   "arrival": 6.928569674026221,
+   "first": 7.033598512876779,
+   "finish": 7.196140164975077,
+   "prompt_len": 3091,
+   "turn": 4,
+   "conv": 0,
+   "output_len": 15
+  },
+  {
+   "arrival": 7.196140164975077,
+   "first": 7.300734238931909,
+   "finish": 10.71296111191623,
+   "prompt_len": 3329,
+   "turn": 5,
+   "conv": 0,
+   "output_len": 256
+  },
+  {
+   "arrival": 8.488096435474063,
+   "first": 8.639319178881124,
+   "finish": 12.23481187201105,
+   "prompt_len": 2048,
+   "turn": 1,
+   "conv": 2,
+   "output_len": 256
+  },
+  {
+   "arrival": 10.156477194977924,
+   "first": 10.257082897936925,
+   "finish": 12.800238597905263,
+   "prompt_len": 2369,
+   "turn": 2,
+   "conv": 1,
+   "output_len": 166
+  },
+  {
+   "arrival": 10.259702246322876,
+   "first": 10.410310772946104,
+   "finish": 14.470951864030212,
+   "prompt_len": 2036,
+   "turn": 1,
+   "conv": 3,
+   "output_len": 256
+  },
+  {
+   "arrival": 10.71296111191623,
+   "first": 10.814031430054456,
+   "finish": 13.134323146892712,
+   "prompt_len": 3650,
+   "turn": 6,
+   "conv": 0,
+   "output_len": 158
+  },
+  {
+   "arrival": 11.437237032232131,
+   "first": 11.58483948605135,
+   "finish": 15.56231540394947,
+   "prompt_len": 2036,
+   "turn": 1,
+   "conv": 4,
+   "output_len": 256
+  },
+  {
+   "arrival": 12.23481187201105,
+   "first": 12.34165129205212,
+   "finish": 16.466687188018113,
+   "prompt_len": 2457,
+   "turn": 2,
+   "conv": 2,
+   "output_len": 256
+  },
+  {
+   "arrival": 12.800238597905263,
+   "first": 12.904838897055015,
+   "finish": 17.43510568095371,
+   "prompt_len": 2610,
+   "turn": 3,
+   "conv": 1,
+   "output_len": 256
+  },
+  {
+   "arrival": 13.251338445535819,
+   "first": 13.414524514926597,
+   "finish": 13.592834370909259,
+   "prompt_len": 2277,
+   "turn": 1,
+   "conv": 5,
+   "output_len": 15
+  },
+  {
+   "arrival": 13.592834370909259,
+   "first": 13.696927583077922,
+   "finish": 18.253409214084968,
+   "prompt_len": 2319,
+   "turn": 2,
+   "conv": 5,
+   "output_len": 256
+  },
+  {
+   "arrival": 14.223283017209402,
+   "first": 14.381228304002434,
+   "finish": 18.93118396308273,
+   "prompt_len": 2090,
+   "turn": 1,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 14.470951864030212,
+   "first": 14.5749181129504,
+   "finish": 16.798826860031113,
+   "prompt_len": 2345,
+   "turn": 2,
+   "conv": 3,
+   "output_len": 136
+  },
+  {
+   "arrival": 15.56231540394947,
+   "first": 15.667479890864342,
+   "finish": 19.278442115988582,
+   "prompt_len": 2336,
+   "turn": 2,
+   "conv": 4,
+   "output_len": 190
+  },
+  {
+   "arrival": 15.937681182199029,
+   "first": 16.090944705996662,
+   "finish": 20.843130917986855,
+   "prompt_len": 2043,
+   "turn": 1,
+   "conv": 7,
+   "output_len": 256
+  },
+  {
+   "arrival": 16.466687188018113,
+   "first": 16.566785868955776,
+   "finish": 19.85609047394246,
+   "prompt_len": 2773,
+   "turn": 3,
+   "conv": 2,
+   "output_len": 163
+  },
+  {
+   "arrival": 16.623590191319227,
+   "first": 16.772754387930036,
+   "finish": 21.4189838799648,
+   "prompt_len": 2038,
+   "turn": 1,
+   "conv": 8,
+   "output_len": 256
+  },
+  {
+   "arrival": 16.798826860031113,
+   "first": 16.89842078485526,
+   "finish": 21.7000280150678,
+   "prompt_len": 2533,
+   "turn": 3,
+   "conv": 3,
+   "output_len": 256
+  },
+  {
+   "arrival": 17.04352992588087,
+   "first": 17.203049276955426,
+   "finish": 21.96842305106111,
+   "prompt_len": 2049,
+   "turn": 1,
+   "conv": 9,
+   "output_len": 256
+  },
+  {
+   "arrival": 17.43510568095371,
+   "first": 17.535007623024285,
+   "finish": 22.4018295800779,
+   "prompt_len": 2894,
+   "turn": 4,
+   "conv": 1,
+   "output_len": 256
+  },
+  {
+   "arrival": 17.456913008258333,
+   "first": 17.67610319587402,
+   "finish": 22.4018295800779,
+   "prompt_len": 2044,
+   "turn": 1,
+   "conv": 10,
+   "output_len": 256
+  },
+  {
+   "arrival": 18.253409214084968,
+   "first": 18.354700387921184,
+   "finish": 22.148240162990987,
+   "prompt_len": 2665,
+   "turn": 3,
+   "conv": 5,
+   "output_len": 203
+  },
+  {
+   "arrival": 18.93118396308273,
+   "first": 19.031447360059246,
+   "finish": 24.121778591070324,
+   "prompt_len": 2372,
+   "turn": 2,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 19.278442115988582,
+   "first": 19.382721083937213,
+   "finish": 24.585308782057837,
+   "prompt_len": 2571,
+   "turn": 3,
+   "conv": 4,
+   "output_len": 256
+  },
+  {
+   "arrival": 19.354402326478905,
+   "first": 19.52398192207329,
+   "finish": 24.585308782057837,
+   "prompt_len": 2037,
+   "turn": 1,
+   "conv": 11,
+   "output_len": 256
+  },
+  {
+   "arrival": 19.85609047394246,
+   "first": 19.956171433907002,
+   "finish": 22.646003938978538,
+   "prompt_len": 3040,
+   "turn": 4,
+   "conv": 2,
+   "output_len": 140
+  },
+  {
+   "arrival": 20.843130917986855,
+   "first": 20.947919020894915,
+   "finish": 26.021240959875286,
+   "prompt_len": 2341,
+   "turn": 2,
+   "conv": 7,
+   "output_len": 244
+  },
+  {
+   "arrival": 21.4189838799648,
+   "first": 21.52274528890848,
+   "finish": 26.984860819997266,
+   "prompt_len": 2343,
+   "turn": 2,
+   "conv": 8,
+   "output_len": 256
+  },
+  {
+   "arrival": 21.492466905546173,
+   "first": 21.671986077912152,
+   "finish": 26.1785789008718,
+   "prompt_len": 2085,
+   "turn": 1,
+   "conv": 12,
+   "output_len": 214
+  },
+  {
+   "arrival": 21.7000280150678,
+   "first": 21.800489481072873,
+   "finish": 27.113458825973794,
+   "prompt_len": 2860,
+   "turn": 4,
+   "conv": 3,
+   "output_len": 256
+  },
+  {
+   "arrival": 21.96842305106111,
+   "first": 22.064398183953017,
+   "finish": 27.38584269792773,
+   "prompt_len": 2370,
+   "turn": 2,
+   "conv": 9,
+   "output_len": 256
+  },
+  {
+   "arrival": 22.148240162990987,
+   "first": 22.248132282868028,
+   "finish": 27.571646051015705,
+   "prompt_len": 2896,
+   "turn": 4,
+   "conv": 5,
+   "output_len": 256
+  },
+  {
+   "arrival": 22.4018295800779,
+   "first": 22.506310851080343,
+   "finish": 27.829731198959053,
+   "prompt_len": 3185,
+   "turn": 5,
+   "conv": 1,
+   "output_len": 256
+  },
+  {
+   "arrival": 22.4018295800779,
+   "first": 22.506310851080343,
+   "finish": 27.829731198959053,
+   "prompt_len": 2390,
+   "turn": 2,
+   "conv": 10,
+   "output_len": 256
+  },
+  {
+   "arrival": 22.646003938978538,
+   "first": 22.751227729022503,
+   "finish": 24.321846198057756,
+   "prompt_len": 3552,
+   "turn": 5,
+   "conv": 2,
+   "output_len": 82
+  },
+  {
+   "arrival": 22.787021809486415,
+   "first": 22.94898864789866,
+   "finish": 25.033937603002414,
+   "prompt_len": 2232,
+   "turn": 1,
+   "conv": 13,
+   "output_len": 114
+  },
+  {
+   "arrival": 22.975257186326495,
+   "first": 23.133038617903367,
+   "finish": 28.146832156926394,
+   "prompt_len": 2225,
+   "turn": 1,
+   "conv": 14,
+   "output_len": 256
+  },
+  {
+   "arrival": 24.121778591070324,
+   "first": 24.2211436110083,
+   "finish": 29.550028993049636,
+   "prompt_len": 2694,
+   "turn": 3,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 24.321846198057756,
+   "first": 24.426868610084057,
+   "finish": 25.680700219934806,
+   "prompt_len": 3990,
+   "turn": 6,
+   "conv": 2,
+   "output_len": 74
+  },
+  {
+   "arrival": 24.585308782057837,
+   "first": 24.689316059928387,
+   "finish": 29.909630352864042,
+   "prompt_len": 2867,
+   "turn": 4,
+   "conv": 4,
+   "output_len": 256
+  },
+  {
+   "arrival": 24.585308782057837,
+   "first": 24.689316059928387,
+   "finish": 28.390239697881043,
+   "prompt_len": 2347,
+   "turn": 2,
+   "conv": 11,
+   "output_len": 179
+  },
+  {
+   "arrival": 25.033937603002414,
+   "first": 25.13399906991981,
+   "finish": 30.456766169983894,
+   "prompt_len": 2377,
+   "turn": 2,
+   "conv": 13,
+   "output_len": 256
+  },
+  {
+   "arrival": 25.809621595621287,
+   "first": 25.963806595886126,
+   "finish": 31.353327173972502,
+   "prompt_len": 2036,
+   "turn": 1,
+   "conv": 15,
+   "output_len": 256
+  },
+  {
+   "arrival": 26.021240959875286,
+   "first": 26.121223957045004,
+   "finish": 29.417113825911656,
+   "prompt_len": 2636,
+   "turn": 3,
+   "conv": 7,
+   "output_len": 160
+  },
+  {
+   "arrival": 26.1785789008718,
+   "first": 26.283045115880668,
+   "finish": 26.84249679907225,
+   "prompt_len": 2515,
+   "turn": 2,
+   "conv": 12,
+   "output_len": 40
+  },
+  {
+   "arrival": 26.84249679907225,
+   "first": 26.94177137990482,
+   "finish": 30.197583505883813,
+   "prompt_len": 2610,
+   "turn": 3,
+   "conv": 12,
+   "output_len": 150
+  },
+  {
+   "arrival": 26.984860819997266,
+   "first": 27.084739815909415,
+   "finish": 30.789211174938828,
+   "prompt_len": 2649,
+   "turn": 3,
+   "conv": 8,
+   "output_len": 174
+  },
+  {
+   "arrival": 27.113458825973794,
+   "first": 27.213548577856272,
+   "finish": 32.51473675807938,
+   "prompt_len": 3142,
+   "turn": 5,
+   "conv": 3,
+   "output_len": 256
+  },
+  {
+   "arrival": 27.38584269792773,
+   "first": 27.485373547067866,
+   "finish": 32.78935712296516,
+   "prompt_len": 2736,
+   "turn": 3,
+   "conv": 9,
+   "output_len": 256
+  },
+  {
+   "arrival": 27.571646051015705,
+   "first": 27.671514309942722,
+   "finish": 32.98258864786476,
+   "prompt_len": 3188,
+   "turn": 5,
+   "conv": 5,
+   "output_len": 256
+  },
+  {
+   "arrival": 27.829731198959053,
+   "first": 27.93072069506161,
+   "finish": 33.242465927964076,
+   "prompt_len": 3496,
+   "turn": 6,
+   "conv": 1,
+   "output_len": 256
+  },
+  {
+   "arrival": 27.829731198959053,
+   "first": 27.93072069506161,
+   "finish": 29.09988049790263,
+   "prompt_len": 2809,
+   "turn": 3,
+   "conv": 10,
+   "output_len": 68
+  },
+  {
+   "arrival": 28.146832156926394,
+   "first": 28.24633160699159,
+   "finish": 31.501263808924705,
+   "prompt_len": 2546,
+   "turn": 2,
+   "conv": 14,
+   "output_len": 163
+  },
+  {
+   "arrival": 28.390239697881043,
+   "first": 28.493964158929884,
+   "finish": 33.70166332600638,
+   "prompt_len": 2596,
+   "turn": 3,
+   "conv": 11,
+   "output_len": 256
+  },
+  {
+   "arrival": 29.09988049790263,
+   "first": 29.200776536017656,
+   "finish": 34.407456951914355,
+   "prompt_len": 2959,
+   "turn": 4,
+   "conv": 10,
+   "output_len": 256
+  },
+  {
+   "arrival": 29.417113825911656,
+   "first": 29.52111085690558,
+   "finish": 34.72539625596255,
+   "prompt_len": 2829,
+   "turn": 4,
+   "conv": 7,
+   "output_len": 256
+  },
+  {
+   "arrival": 29.550028993049636,
+   "first": 29.64945958601311,
+   "finish": 34.85438383696601,
+   "prompt_len": 2981,
+   "turn": 4,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 29.909630352864042,
+   "first": 30.009594161063433,
+   "finish": 31.850765089970082,
+   "prompt_len": 3160,
+   "turn": 5,
+   "conv": 4,
+   "output_len": 93
+  },
+  {
+   "arrival": 30.197583505883813,
+   "first": 30.29719357402064,
+   "finish": 35.400900084059685,
+   "prompt_len": 2811,
+   "turn": 4,
+   "conv": 12,
+   "output_len": 256
+  },
+  {
+   "arrival": 30.456766169983894,
+   "first": 30.55691631603986,
+   "finish": 32.27037089294754,
+   "prompt_len": 2853,
+   "turn": 3,
+   "conv": 13,
+   "output_len": 91
+  },
+  {
+   "arrival": 30.789211174938828,
+   "first": 30.889164976077154,
+   "finish": 35.89132387796417,
+   "prompt_len": 3026,
+   "turn": 4,
+   "conv": 8,
+   "output_len": 256
+  },
+  {
+   "arrival": 31.353327173972502,
+   "first": 31.4568625818938,
+   "finish": 36.447261404944584,
+   "prompt_len": 2347,
+   "turn": 2,
+   "conv": 15,
+   "output_len": 256
+  },
+  {
+   "arrival": 31.501263808924705,
+   "first": 31.60332356602885,
+   "finish": 36.69376760604791,
+   "prompt_len": 2754,
+   "turn": 3,
+   "conv": 14,
+   "output_len": 256
+  },
+  {
+   "arrival": 31.850765089970082,
+   "first": 31.950297855073586,
+   "finish": 37.040616448037326,
+   "prompt_len": 3326,
+   "turn": 6,
+   "conv": 4,
+   "output_len": 256
+  },
+  {
+   "arrival": 32.27037089294754,
+   "first": 32.369155952939764,
+   "finish": 37.35087003093213,
+   "prompt_len": 2979,
+   "turn": 4,
+   "conv": 13,
+   "output_len": 256
+  },
+  {
+   "arrival": 32.51473675807938,
+   "first": 32.61457274691202,
+   "finish": 37.59204830788076,
+   "prompt_len": 3434,
+   "turn": 6,
+   "conv": 3,
+   "output_len": 256
+  },
+  {
+   "arrival": 32.78935712296516,
+   "first": 32.8947706760373,
+   "finish": 33.55851379991509,
+   "prompt_len": 3342,
+   "turn": 4,
+   "conv": 9,
+   "output_len": 40
+  },
+  {
+   "arrival": 32.98258864786476,
+   "first": 33.08165912795812,
+   "finish": 35.59150617592968,
+   "prompt_len": 3497,
+   "turn": 6,
+   "conv": 5,
+   "output_len": 133
+  },
+  {
+   "arrival": 33.55851379991509,
+   "first": 33.65849375608377,
+   "finish": 38.40249580703676,
+   "prompt_len": 3421,
+   "turn": 5,
+   "conv": 9,
+   "output_len": 256
+  },
+  {
+   "arrival": 33.70166332600638,
+   "first": 33.80167783796787,
+   "finish": 36.56128073390573,
+   "prompt_len": 2885,
+   "turn": 4,
+   "conv": 11,
+   "output_len": 151
+  },
+  {
+   "arrival": 34.407456951914355,
+   "first": 34.50858706794679,
+   "finish": 39.13071469007991,
+   "prompt_len": 3300,
+   "turn": 5,
+   "conv": 10,
+   "output_len": 256
+  },
+  {
+   "arrival": 34.72539625596255,
+   "first": 34.82554494892247,
+   "finish": 39.444419800071046,
+   "prompt_len": 3121,
+   "turn": 5,
+   "conv": 7,
+   "output_len": 256
+  },
+  {
+   "arrival": 34.85438383696601,
+   "first": 34.95387768000364,
+   "finish": 39.57237214385532,
+   "prompt_len": 3284,
+   "turn": 5,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 35.400900084059685,
+   "first": 35.5047095969785,
+   "finish": 40.11120582697913,
+   "prompt_len": 3103,
+   "turn": 5,
+   "conv": 12,
+   "output_len": 256
+  },
+  {
+   "arrival": 35.89132387796417,
+   "first": 35.990770844975486,
+   "finish": 40.534196119057015,
+   "prompt_len": 3318,
+   "turn": 5,
+   "conv": 8,
+   "output_len": 252
+  },
+  {
+   "arrival": 36.447261404944584,
+   "first": 36.54697856400162,
+   "finish": 41.139673478901386,
+   "prompt_len": 2647,
+   "turn": 3,
+   "conv": 15,
+   "output_len": 256
+  },
+  {
+   "arrival": 36.56128073390573,
+   "first": 36.665155861061066,
+   "finish": 41.25351966591552,
+   "prompt_len": 3077,
+   "turn": 5,
+   "conv": 11,
+   "output_len": 256
+  },
+  {
+   "arrival": 36.69376760604791,
+   "first": 36.79731665505096,
+   "finish": 38.219436248065904,
+   "prompt_len": 3074,
+   "turn": 4,
+   "conv": 14,
+   "output_len": 95
+  },
+  {
+   "arrival": 37.35087003093213,
+   "first": 37.450893566943705,
+   "finish": 41.92892098100856,
+   "prompt_len": 3276,
+   "turn": 5,
+   "conv": 13,
+   "output_len": 256
+  },
+  {
+   "arrival": 38.219436248065904,
+   "first": 38.3187942688819,
+   "finish": 42.77452667988837,
+   "prompt_len": 3244,
+   "turn": 5,
+   "conv": 14,
+   "output_len": 256
+  },
+  {
+   "arrival": 38.40249580703676,
+   "first": 38.50220992602408,
+   "finish": 42.95447456208058,
+   "prompt_len": 3746,
+   "turn": 6,
+   "conv": 9,
+   "output_len": 256
+  },
+  {
+   "arrival": 39.13071469007991,
+   "first": 39.234843689017,
+   "finish": 43.550400151871145,
+   "prompt_len": 3606,
+   "turn": 6,
+   "conv": 10,
+   "output_len": 256
+  },
+  {
+   "arrival": 39.444419800071046,
+   "first": 39.54434732790105,
+   "finish": 41.92892098100856,
+   "prompt_len": 3551,
+   "turn": 6,
+   "conv": 7,
+   "output_len": 135
+  },
+  {
+   "arrival": 39.57237214385532,
+   "first": 39.676429085899144,
+   "finish": 43.76934903906658,
+   "prompt_len": 3645,
+   "turn": 6,
+   "conv": 6,
+   "output_len": 256
+  },
+  {
+   "arrival": 40.11120582697913,
+   "first": 40.211197776021436,
+   "finish": 43.62852574698627,
+   "prompt_len": 3403,
+   "turn": 6,
+   "conv": 12,
+   "output_len": 214
+  },
+  {
+   "arrival": 40.534196119057015,
+   "first": 40.63502744096331,
+   "finish": 44.52838877099566,
+   "prompt_len": 3606,
+   "turn": 6,
+   "conv": 8,
+   "output_len": 256
+  },
+  {
+   "arrival": 41.139673478901386,
+   "first": 41.23945634206757,
+   "finish": 44.321367939934134,
+   "prompt_len": 3056,
+   "turn": 4,
+   "conv": 15,
+   "output_len": 211
+  },
+  {
+   "arrival": 41.25351966591552,
+   "first": 41.35293842991814,
+   "finish": 44.97588731790893,
+   "prompt_len": 3390,
+   "turn": 6,
+   "conv": 11,
+   "output_len": 256
+  },
+  {
+   "arrival": 41.92892098100856,
+   "first": 42.0329862490762,
+   "finish": 42.2268256470561,
+   "prompt_len": 3722,
+   "turn": 6,
+   "conv": 13,
+   "output_len": 15
+  },
+  {
+   "arrival": 42.77452667988837,
+   "first": 42.87417312595062,
+   "finish": 46.098780053900555,
+   "prompt_len": 3528,
+   "turn": 6,
+   "conv": 14,
+   "output_len": 256
+  },
+  {
+   "arrival": 44.321367939934134,
+   "first": 44.41775659401901,
+   "finish": 46.238110130885616,
+   "prompt_len": 3326,
+   "turn": 5,
+   "conv": 15,
+   "output_len": 156
+  },
+  {
+   "arrival": 46.238110130885616,
+   "first": 46.33772272802889,
+   "finish": 47.97658285801299,
+   "prompt_len": 3586,
+   "turn": 6,
+   "conv": 15,
+   "output_len": 154
+  }
+ ]
+}
