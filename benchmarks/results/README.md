@@ -69,6 +69,25 @@
 | `smoke_f00fed2.log` | 中间提交 f00fed2 的冒烟运行 |
 | `first_run/` | 早先的单测日志和 v2 端到端日志，已被上面的文件取代。除 `test_rejection_sampler.log`（日志头：17:29:20，git=6d8628a，GPU 4）外都没有日志头，无法确认是在哪个提交上跑的。v2 端到端的 summary JSON 与 v1、v2 的两份逐字节相同（md5 68f51c77ee99efe2939acf73d14bf89e），为节省空间没有保留 |
 
+## 短 prefill 的定位与 CUDA Graph（`profile_prefill/`、`prefill_fix/`、`prefill_graph/`）
+
+见 `docs/prefill_cuda_graph.md`。计时类测量都在 GPU 0 上单独运行；日志开头记录了时间、提交、`CUDA_VISIBLE_DEVICES`、环境变量（含 `PYTHONPATH`、`FLA_INTRACARD_CP`）、各 GPU 占用和命令，末尾是退出码。
+
+| 目录 | 引擎 | 内容 |
+|---|---|---|
+| `profile_prefill/before.log`、`after.log`（及同名目录里的 JSON 和 profiler trace） | 524d5de，`FLA_INTRACARD_CP=1`（修复前的行为）/ 默认 | `benchmarks/profile_prefill.py` 实验 A–E |
+| `profile_prefill/find_syncs_intracard_{1,0}.log` | 524d5de（`PYTHONPATH=/data/csd/nano-vllm-fix`） | `benchmarks/find_prefill_syncs.py`：前向里的同步次数与位置。在 GPU 4 上运行（不计时） |
+| `profile_prefill/exploration/` | 0833ed6 / 524d5de | 定位过程中的探索性运行（含 `FLA_INTRACARD_CP` 开 / 关时 2K–32K token 的长 prompt 对比）。`first_profile_intracard_on.log` 的实验 E 因脚本缺陷在采样处崩溃，D 中的 "GPU busy" 计算有误，均已在后来的脚本中修正 |
+| `prefill_fix/correctness/` | 524d5de | 修复一之后的单测与端到端测试；端到端 summary 与修复前逐字节相同 |
+| `prefill_fix/throughput_no_warmup_round/` | 524d5de | 第一次满载吞吐测量，没有不计时的预热轮（C=16、32 的第一轮含约 3 s 的一次性编译），已被 `prefill_graph/throughput/fix_*` 取代 |
+| `prefill_graph/latency/{graph,eager}.log` | d7e9967（`/data/csd/nano-vllm-g1`） | 同一引擎 prefill Graph 开 / 关时的 prefill 延迟 |
+| `prefill_graph/latency/graph_cap2048.log` | 同上 | 上限设为 2048 时的延迟，用来选择上限 1024 |
+| `prefill_graph/overhead/` | d7e9967 | `run_snapshot_overhead.sh`，单请求的未命中 / 命中 / 64 token prefill |
+| `prefill_graph/online/` | d7e9967 | `run_prefix_cache_matrix.sh`，branch 2 次、off 1 次，参数与 `v2_extra/` 相同 |
+| `prefill_graph/throughput/{graph,fix}_*.{json,log}` | d7e9967 / 524d5de（`/data/csd/nano-vllm-fix`） | `bench_throughput.py`，每个并发度先跑 1 轮不计时的预热；脚本都来自 d7e9967 |
+| `prefill_graph/correctness/` | e0eb359（引擎代码与 d7e9967 相同） | kernel 精度、prefill Graph 对比（Qwen3.5-4B、MTP、Qwen3-0.6B）、单测、端到端测试；`first_attempt/` 是测试修正前的一次运行（上限改为 1024 后，测试仍按 512 判断哪些长度该走 eager；端到端测试当时把 Graph 路径与 eager 参照直接比较） |
+| `prefill_graph/startup_cost.log` | e0eb359 | 启动时间、prefill Graph 数量、显存与 KV block 数（在 GPU 4 上运行，当时 GPU 0 在跑端到端测试，只作粗略参考） |
+
 ## 汇总
 
 ```bash

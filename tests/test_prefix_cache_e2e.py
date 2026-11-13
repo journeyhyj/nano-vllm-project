@@ -165,12 +165,12 @@ def worker(name, out_path):
         report[scenario] = dict(preemptions=preemptions[0] - preempt_before, hit_then_preempted=list(hit_then_preempted))
         hit_then_preempted.clear()
     result = dict(outputs=outputs, admissions=admissions, scenarios=report, stats=scheduler.block_manager.stats)
-    if ref_name is None:
-        torch.save(dict(result, logits=logits_of, gaps=gaps_of), out_path)
-    else:
+    if ref_name is not None:
         ref = torch.load(out_path.replace(f"{name}.pt", f"{ref_name}.pt"))
         result["comparison"] = compare(ref, outputs, logits_of)
-        torch.save(result, out_path)
+    if any(r == name for _, r, _ in CONFIGS.values()):    # a reference of other configurations (off_graph is both)
+        result.update(logits=logits_of, gaps=gaps_of)
+    torch.save(result, out_path)
 
 
 def compare(ref, outputs, logits_of):

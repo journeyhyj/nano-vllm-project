@@ -1,6 +1,6 @@
 # nano-vllm：Qwen3.5 混合架构推理 + MTP 投机解码
 
-本项目基于 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)（一个约 1200 行 Python 的 vLLM 极简实现）。在保留原有功能（paged KV cache、prefix caching、chunked prefill、CUDA Graph、张量并行）的基础上，新增了下面五项：
+本项目基于 [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)（一个约 1200 行 Python 的 vLLM 极简实现）。在保留原有功能（paged KV cache、prefix caching、chunked prefill、CUDA Graph、张量并行）的基础上，新增了下面六项：
 
 | 功能 | 一句话说明 |
 |---|---|
@@ -8,7 +8,8 @@
 | **MTP 投机解码** | 用模型自带的 MTP 头起草 token，再由目标模型一次验证；拒绝采样保证输出分布与目标模型一致 |
 | **小词表起草** | 起草时 lm_head 只计算 32K 个高频 token，这部分耗时降为原来的约 1/7，输出依然无损 |
 | **FLA prefill** | 线性注意力的 prefill 改用 flash-linear-attention 的 chunk kernel，长 prompt 的 prefill 快 1.26–1.31× |
-| **混合模型的 prefix caching** | 在 block 边界保存 Gated DeltaNet 的状态快照，命中时与 KV 一起恢复。共享 8000 token system prompt 时，TTFT p50 从 494 ms 降到 106 ms |
+| **混合模型的 prefix caching** | 在 block 边界保存 Gated DeltaNet 的状态快照，命中时与 KV 一起恢复。共享 8000 token system prompt 时，TTFT p50 从 494 ms 降到 106 ms，加上下一项后降到 27 ms |
+| **短 prefill 走 CUDA Graph** | profile 定位到 1K token 以下的 prefill 是 CPU 瓶颈（64 token 时一步约 91 ms，GPU 只算 13 ms），并去掉 FLA 在每个 GDN 层的一次 GPU→CPU 同步；这类 prefill 改为回放 CUDA Graph，64 token 的 prefill 从 89 ms 降到 13.6 ms |
 
 ## 结果
 
@@ -50,21 +51,37 @@
 - "改动前"是加入本功能之前的引擎（c5af84b），当时混合模型不做 prefix caching。
 - "branch" 是默认策略。benchmark 中把快照池设为 48 份（2358 MiB，`--num-state-snapshots 48`）；默认的自动大小没有测过。
 
-| 负载 | QPS | 改动前 TTFT p50 / p99 | branch TTFT p50 / p99 | p50 加速 | 命中率 |
-|---|---|---|---|---|---|
-| 共享 2000 token | 4 | 148 / 1094 ms | 106 / 209 ms | 1.39× | 83.5% |
-| 共享 4000 token | 2 | 251 / 673 ms | 111 / 261 ms | 2.26× | 91.2% |
-| 共享 8000 token | 1 | 494 / 1372 ms | 106 / 539 ms | 4.64× | 95.1% |
-| 多轮对话 | 0.5 段/s | 184 / 415 ms | 101 / 188 ms | 1.82× | 78.1% |
+| 负载 | QPS | 改动前 p50 / p99 | prefix caching（branch）p50 / p99 | 再加短 prefill CUDA Graph p50 / p99 | p50 加速（最后一列对改动前） | 命中率 |
+|---|---|---|---|---|---|---|
+| 共享 2000 token | 4 | 148 / 1094 ms | 106 / 209 ms | 34 / 130 ms | 4.29× | 83.5% |
+| 共享 4000 token | 2 | 251 / 673 ms | 111 / 261 ms | 31 / 252 ms | 8.05× | 91.2% |
+| 共享 8000 token | 1 | 494 / 1372 ms | 106 / 539 ms | 27 / 490 ms | 18.31× | 95.1% |
+| 多轮对话 | 0.5 段/s | 184 / 415 ms | 101 / 188 ms | 32 / 163 ms | 5.74× | 78.2% |
 
 说明：
-- 每格是 2 次运行的平均。
-- 命中后的 TTFT p50 在 101–113 ms。单个请求时，64 token prompt 的一步 prefill 也要 93–96 ms，这是命中后的下限，它的构成没有分解。所以前缀越长，加速越明显。
+- 每格是 2 次运行的平均。"prefix caching" 一列是提交 40a3ccf，"再加 CUDA Graph" 一列是提交 d7e9967（日志在 `benchmarks/results/prefill_graph/online/`）。
+- 只有 prefix caching 时，命中后的 TTFT 停在约 100 ms，这是一步 prefill 的固定开销；下一小节定位了它的来源，并用 CUDA Graph 把它降到 13.6–20.8 ms（单个请求时）。
 - 8000 token 时的 p99 来自最早的两个请求：branch 要第三次遇到同一个前缀才命中，前两个请求都得完整 prefill。
 - 只共享 KV、GDN 全部重算（kv_only）时，TTFT 与不开 cache 相同。
 - 开启 MTP 时同样有效（各 1 次运行）：共享 4000 token、QPS 2 下，p50 从 261 ms 降到 112 ms，接受率都是 0.810。
 
 全部策略、各次运行的范围、开销分解以及没有收益的设计，见 [docs/hybrid_prefix_cache.md](docs/hybrid_prefix_cache.md)。原始 JSON 和日志在 `benchmarks/results/`，汇总表是 `benchmarks/results/summary.md`。
+
+### 短 prefill：定位 CPU 瓶颈，改用 CUDA Graph
+
+测试条件：RTX 4090，单个请求独占引擎，随机 token 的 prompt，7 次取中位数；同一个引擎分别开、关 prefill Graph（`prefill_graph_tokens`）。
+
+| prompt | 1 | 64 | 256 | 512 | 1024 | 2048 |
+|---|---|---|---|---|---|---|
+| eager prefill | 82.8 ms | 89.4 ms | 89.3 ms | 89.5 ms | 90.3 ms | 115.8 ms |
+| CUDA Graph | 12.0 ms | 13.6 ms | 22.1 ms | 35.9 ms | 67.1 ms | （超过上限，走 eager） |
+
+说明：
+- 定位：1024 token 以下 prefill 耗时几乎不随长度变化；profile 显示一步 64 token 的 prefill 发起 1202 个 kernel，GPU 只忙 13.2 ms，其余时间 GPU 在等 CPU 发 kernel。另外查到 FLA 0.4.2 在每个 GDN 层做一次 GPU→CPU 同步，它让 CPU 和 GPU 无法重叠，也让 prefill 无法录成 CUDA Graph。
+- 第一项修复（只改默认环境变量 `FLA_INTRACARD_CP=0`）去掉了同步：2048 token 的 prefill 从 128.3 降到 114.5 ms，长到 32K token 的 prompt 也不变慢，输出逐字节不变。
+- 第二项修复：不超过 1024 token、16 条序列的 prefill 按档位补齐后回放 CUDA Graph。Graph 里的 GDN 层改用 FLA 的 fused recurrent kernel（与 float64 参照相比误差更小，但与 eager 不再逐位相同）。它逐 token 递推，单条序列超过约 1K token 后反而更慢，所以上限设为 1024。
+- 满载吞吐不变（满载时时间在 decode 上，decode 本来就用 CUDA Graph）；低并发的首 token 延迟下降：输入 138、输出 1024 token 时，并发 1 的 TTFT 从 92 降到 20 ms，并发 4 从 90 降到 55 ms。
+- 定位过程、设计、正确性测试和全部实验见 [docs/prefill_cuda_graph.md](docs/prefill_cuda_graph.md)。
 
 ## 设计要点
 
@@ -141,6 +158,15 @@ Qwen3.5-4B 共 32 层，其中 24 层是 Gated DeltaNet，8 层是全注意力�
 - **decode 中保存**：MTP 验证 kernel 本来就会写出每个 token 之后的状态，越过边界时直接拷贝；草稿被拒绝时这份快照作废。
 - **兼容性**：支持 chunked prefill、抢占（重新接纳后可以再次命中）、CUDA Graph 和 MTP。端到端测试中，贪心输出只在 bf16 近似平局处分叉（top-2 logit 差 ≤ 0.125）；在前 32 个生成位置内，最大 logit 误差 0.63，小于只改变 batch 组成时的 0.69。
 
+### 6. 短 prefill 的 CUDA Graph
+
+- **为什么 prefill 也录图**：Graph 省的是 CPU 发 kernel 的时间，所以该看这一步 GPU 有多少活。Qwen3.5-4B 在 4090 上 1K token 以下的 prefill 和 decode 一样是 CPU 瓶颈。
+- **去掉同步**：fla-core 0.4.2 默认把 `chunk_gated_delta_rule_fwd_h` 分派给"卡内 context parallel"后端，但没有把我们传入的 `cu_seqlens_cpu` 转交给它，后端就自己 `cu_seqlens.cpu()`。引擎在导入 FLA 前把 `FLA_INTRACARD_CP` 默认设为 0。
+- **分档补齐**：按 token 数（16…1024）和序列数（1…16）录 35 张图，与 decode 共用显存池。补齐的 token 不属于任何序列、不写 KV；补齐的序列长度为 0，状态槽指向备用槽。注意力总是经 block table 读 K/V。
+- **换 kernel**：FLA chunk kernel 的网格由 CPU 按序列长度算出，补齐后也会变，无法回放；Graph 里改用 fused recurrent kernel，网格只取决于序列条数。
+- **不走 Graph 的情况**：超过上限、超过 16 条序列，或这一步要保存 prefix cache 的状态快照。
+- **代价**：启动多约 10 s，显存多 176 MiB，KV block 数不变。
+
 ## 使用
 
 ```bash
@@ -161,6 +187,8 @@ outputs = llm.generate(["Hello, Nano-vLLM."], SamplingParams(temperature=0.7, ma
 - `num_state_snapshots`：快照池的大小。默认 −1，表示取 64 和"剩余显存的 25% 能放下的份数"中较小的一个。
 
 例如 `LLM(path, prefix_cache_policy="branch", num_state_snapshots=48)`。
+
+短 prefill 的 CUDA Graph 默认开启：`prefill_graph_tokens` 是走 Graph 的 prefill 的 token 上限（默认 1024，设为 0 关闭；`enforce_eager=True` 时也不录）。
 
 `assets/qwen3_5_draft_vocab_32k.json` 适用于整个 Qwen3.5 系列（它们共用同一个 tokenizer）。如果要为其他模型或数据重新生成：
 
@@ -197,6 +225,14 @@ EXTRA="--num-state-snapshots 48" benchmarks/run_prefix_cache_matrix.sh benchmark
 benchmarks/run_snapshot_overhead.sh benchmarks/results/mine_overhead off last branch all
 python benchmarks/bench_fla_calls.py
 python benchmarks/summarize_prefix_cache.py benchmarks/results/baseline benchmarks/results/mine
+
+# 短 prefill：定位（实验 A–E）、同步检查、Graph 开 / 关的延迟、满载吞吐、正确性
+python benchmarks/profile_prefill.py ~/huggingface/Qwen3.5-4B --out-dir prof
+FLA_INTRACARD_CP=1 python benchmarks/find_prefill_syncs.py ~/huggingface/Qwen3.5-4B
+python benchmarks/profile_prefill.py ~/huggingface/Qwen3.5-4B --experiments A --prefill-graph-tokens 0
+python benchmarks/bench_throughput.py ~/huggingface/Qwen3.5-4B --out k0.json
+python tests/test_gdn_kernel_accuracy.py
+python tests/test_prefill_graph.py
 ```
 
 `bench_prefix_cache.py` 默认从 `/data/csd/nano-vllm-data/mt_bench_question.jsonl` 读 MT-Bench 问题，可以用 `--questions question.jsonl` 换成上面下载的文件。
@@ -211,13 +247,15 @@ python benchmarks/summarize_prefix_cache.py benchmarks/results/baseline benchmar
 - MTP 每步只起草 1 个 token，只支持单卡，只支持温度采样（不支持 top-p / top-k）。
 - Qwen3.5 还不支持张量并行。
 - 混合模型的 prefix caching：
-  - 命中后的 TTFT 不会低于一步 prefill 的固定开销（单个请求时 93–96 ms）；
+  - 命中后剩下的部分超过 1024 token，或这一步要保存快照时，仍走 eager prefill，要付约 90 ms 的固定开销；
   - `branch` 要第三次遇到同一前缀才命中；
   - 同一步被接纳的请求互相用不上对方的快照；
   - 长 prompt 上保存快照会退回到切开 FLA 窗口；
   - 只在 Qwen3.5-4B、单卡上测过。
   - 详见 [docs/hybrid_prefix_cache.md](docs/hybrid_prefix_cache.md) 第 5 节。
-- SSM 状态用 fp32 存储，开启 MTP 后每条序列要占两份。所以在 24 GB 显卡上，开启 MTP 的最大并发约为不开时的一半。
+- 短 prefill 的 CUDA Graph：超过 1024 token 的 prefill 没有收益；Graph 路径与 eager 的结果不逐位相同（GDN 用了另一个 kernel）。详见 [docs/prefill_cuda_graph.md](docs/prefill_cuda_graph.md) 第 6 节。
+- SSM 状态用 fp32 存储，开启 MTP 后每条序列要占两份。所以在 24 GB 显卡上，开启 MTP 的最大并发约为不开时的一半。满载时这会让 MTP 反而更慢：并发 64 时最多同时跑 47 条序列，输出吞吐 2319 tok/s，低于不开 MTP 的 2994 tok/s。
+- 小词表起草的收益是在贪心解码下测的；temperature 1.0、随机 token 的 prompt 下，接受率从约 0.71 降到约 0.60，吞吐不比完整词表高。
 
 ## 致谢
 
