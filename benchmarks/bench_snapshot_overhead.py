@@ -78,6 +78,7 @@ def main():
                   short_prefill_ms=statistics.median(short), short_all_ms=short,
                   snapshot_restore_copy_ms=copy_ms, snapshot_bytes_each=getattr(mr, "state_bytes", 0),
                   num_state_snapshots=mr.config.num_state_snapshots, num_kvcache_blocks=mr.config.num_kvcache_blocks,
+                  prefill_graph_tokens=getattr(mr.config, "prefill_graph_tokens", None),
                   stats=llm.scheduler.block_manager.stats, gpu=torch.cuda.get_device_name(),
                   cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
     code = os.path.dirname(os.path.abspath(nanovllm.__file__))    # the engine actually imported (PYTHONPATH worktrees)

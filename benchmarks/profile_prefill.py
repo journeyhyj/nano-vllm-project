@@ -245,11 +245,13 @@ def main():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--experiments", default="ABCDE", help="subset of A-E to run")
+    parser.add_argument("--prefill-graph-tokens", type=int, default=None, help="engine default if omitted; 0 = eager")
     args = parser.parse_args()
     lens = [int(x) for x in args.lens.split(",")]
 
     llm = LLM(os.path.expanduser(args.model), max_model_len=args.max_model_len, max_num_seqs=16,
-              gpu_memory_utilization=args.gpu_memory_utilization, prefix_cache_policy="off")
+              gpu_memory_utilization=args.gpu_memory_utilization, prefix_cache_policy="off",
+              **({} if args.prefill_graph_tokens is None else dict(prefill_graph_tokens=args.prefill_graph_tokens)))
     rng = random.Random(0)
     fresh = lambda n: [rng.randint(1000, 100000) for _ in range(n)]
     for n in sorted(set(lens + [args.short, args.long])):    # warmup: torch.compile shapes, FLA autotune
@@ -259,7 +261,8 @@ def main():
                cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), torch=torch.__version__,
                nanovllm_path=os.path.dirname(nanovllm.__file__), loadavg_before=os.getloadavg(),
                engine=dict(max_model_len=args.max_model_len, max_num_seqs=16,
-                           gpu_memory_utilization=args.gpu_memory_utilization, prefix_cache_policy="off"))
+                           gpu_memory_utilization=args.gpu_memory_utilization, prefix_cache_policy="off",
+                           prefill_graph_tokens=llm.model_runner.config.prefill_graph_tokens))
     try:
         d = os.path.dirname(nanovllm.__file__)
         res["git"] = subprocess.check_output(["git", "-C", d, "rev-parse", "--short", "HEAD"], text=True).strip()

@@ -13,7 +13,7 @@ import torch
 from torch import nn
 import triton
 import triton.language as tl
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 from nanovllm.utils.context import get_context
 
@@ -264,6 +264,18 @@ class LinearAttention(nn.Module):
         # (a sequence cut by a window boundary carries its state into the next window), then scatter the states back
         Hk, Hv, K, V = self.num_k_heads, self.num_v_heads, self.head_k_dim, self.head_v_dim
         state = ssm_state[context.state_slots] * context.has_initial_state.view(-1, 1, 1, 1)    # zero for new sequences
+        if context.recurrent_prefill:
+            # CUDA graph prefill (ModelRunner.run_prefill_graph): one kernel per layer whose grid depends only on the
+            # number of sequences, so padded batches replay the same graph. Sequences of length 0 pad the batch and
+            # keep their (spare) state; rows past the last sequence are padding and are not read. No snapshots here.
+            n = x.size(0)
+            q, k, v = x.split([Hk * K, Hk * K, Hv * V], dim=-1)
+            o, final_state = fused_recurrent_gated_delta_rule(
+                q.reshape(1, n, Hk, K), k.reshape(1, n, Hk, K), v.reshape(1, n, Hv, V), g=g[None], beta=beta[None],
+                scale=self.scale, initial_state=state, output_final_state=True, use_qk_l2norm_in_kernel=True,
+                cu_seqlens=context.cu_seqlens_q)
+            ssm_state[context.state_slots] = final_state
+            return o[0]
         o = x.new_empty(x.size(0), Hv, V)
         for start, end, first, last, cu_seqlens, cu_seqlens_cpu, snapshots, extra in context.fla_windows:
             if extra is None:

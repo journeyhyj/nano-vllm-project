@@ -3,7 +3,9 @@
 # artifacts/chitu-4090 (input 128 tokens before the chat template = 137-140 after it, output 1024, 3 warmup requests and
 # 10 timed rounds per concurrency) so the numbers can be put side by side. Reports per concurrency: output and total
 # token throughput (mean +- sample SD over rounds), mean TTFT and TPOT, the most sequences that actually ran at once
-# (state slots can cap it below C), and the MTP acceptance.
+# (state slots can cap it below C), and the MTP acceptance. Unlike the Chitu client, one untimed round at concurrency C
+# runs first (--warmup-rounds): the first prefill of a new batch shape pays one-time compilation and autotuning, which
+# otherwise lands in the first timed round (about 3 s of TTFT at C=16 and C=32).
 # Usage: python benchmarks/bench_throughput.py ~/huggingface/Qwen3.5-4B --concurrency 1,2,4,8,16,32,64 [--k 1]
 #        [--draft-vocab assets/qwen3_5_draft_vocab_32k.json] --out result.json
 import argparse
@@ -56,6 +58,7 @@ def main():
     parser.add_argument("--output-len", type=int, default=1024)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=10)
+    parser.add_argument("--warmup-rounds", type=int, default=1, help="untimed rounds at concurrency C before timing")
     parser.add_argument("--max-round-tokens", type=int, default=200_000,
                         help="fewer rounds for large C: rounds = min(--rounds, max(3, this // (C * output_len)))")
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -64,6 +67,7 @@ def main():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--k", type=int, default=0, help="num_speculative_tokens (MTP)")
     parser.add_argument("--draft-vocab", default=None)
+    parser.add_argument("--prefill-graph-tokens", type=int, default=None, help="engine default if omitted; 0 = eager")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
@@ -71,7 +75,8 @@ def main():
 
     llm = LLM(os.path.expanduser(args.model), max_model_len=args.max_model_len,
               max_num_seqs=args.max_num_seqs or max(conc), gpu_memory_utilization=args.gpu_memory_utilization,
-              num_speculative_tokens=args.k, draft_vocab=args.draft_vocab, prefix_cache_policy="off")
+              num_speculative_tokens=args.k, draft_vocab=args.draft_vocab, prefix_cache_policy="off",
+              **({} if args.prefill_graph_tokens is None else dict(prefill_graph_tokens=args.prefill_graph_tokens)))
     cfg = llm.model_runner.config
     rng = random.Random(args.seed)
     prompt = lambda: [rng.randint(1000, 100000) for _ in range(args.input_len)]
@@ -94,6 +99,8 @@ def main():
     for c in conc:
         stats = dict(max_running=0)
         run_round(llm, [prompt() for _ in range(args.warmup)], sp, stats)    # warmup, as the Chitu client does
+        for _ in range(args.warmup_rounds):
+            run_round(llm, [prompt() for _ in range(c)], sp, stats)
         stats["max_running"] = 0
         accepted.update(steps=0, tokens=0)
         rounds = min(args.rounds, max(3, args.max_round_tokens // (c * args.output_len)))
@@ -126,6 +133,7 @@ def main():
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), cuda_device_order=os.environ.get("CUDA_DEVICE_ORDER"),
         nanovllm_path=d, git=git, git_dirty=dirty, loadavg_before=load_before, loadavg_after=os.getloadavg(),
         args=vars(args), max_num_seqs_effective=cfg.max_num_seqs, num_kvcache_blocks=cfg.num_kvcache_blocks,
+        prefill_graph_tokens=cfg.prefill_graph_tokens,
         results=results,
     )
     if args.out:

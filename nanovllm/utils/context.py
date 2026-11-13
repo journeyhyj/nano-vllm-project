@@ -17,15 +17,16 @@ class Context:
     query_len: int = 1
     fla_windows: list | None = None    # linear attention prefill, see plan_fla_windows
     conv_snapshots: tuple | None = None    # linear attention prefill: conv-state snapshots, see ModelRunner.prepare_conv_snapshots
+    recurrent_prefill: bool = False    # linear attention prefill through the fused recurrent kernel (CUDA graph prefill)
 
 _CONTEXT = Context()
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_slots=None, has_initial_state=None, query_len=1, fla_windows=None, conv_snapshots=None):
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None, state_slots=None, has_initial_state=None, query_len=1, fla_windows=None, conv_snapshots=None, recurrent_prefill=False):
     global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables, state_slots, has_initial_state, query_len, fla_windows, conv_snapshots)
+    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables, state_slots, has_initial_state, query_len, fla_windows, conv_snapshots, recurrent_prefill)
 
 def reset_context():
     global _CONTEXT

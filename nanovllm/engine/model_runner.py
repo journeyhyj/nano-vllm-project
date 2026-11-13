@@ -30,6 +30,7 @@ class ModelRunner:
         self.query_len = 1 + self.num_speculative_tokens    # tokens per sequence in a decode step
         self.draft_probs = None
         self.mtp_graphs = {}
+        self.prefill_graphs = {}
         self.snapshot_bytes = 0
 
         port = os.environ.get("NANOVLLM_PORT", "2333")    # set it to run several engines on one host
@@ -62,6 +63,8 @@ class ModelRunner:
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
+            if config.prefill_graph_tokens:
+                self.capture_prefill_graphs()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -81,7 +84,7 @@ class ModelRunner:
             if self.rank == 0:
                 self.shm.unlink()
         if not self.enforce_eager:
-            del self.graphs, self.mtp_graphs, self.graph_pool
+            del self.graphs, self.mtp_graphs, self.prefill_graphs, self.graph_pool
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
@@ -389,7 +392,10 @@ class ModelRunner:
     def run(self, seqs: list[Sequence], is_prefill: bool):
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        hidden_states = self.run_model(input_ids, positions, is_prefill)
+        if is_prefill and self.use_prefill_graph(seqs, input_ids.size(0)):
+            hidden_states = self.run_prefill_graph(seqs, input_ids, positions)
+        else:
+            hidden_states = self.run_model(input_ids, positions, is_prefill)
         logits = self.model.compute_logits(hidden_states)
         if self.num_speculative_tokens:
             output = self.run_speculative(seqs, is_prefill, positions, hidden_states, logits, temperatures)
@@ -438,6 +444,80 @@ class ModelRunner:
         if self.draft_ids is not None:    # index in the draft vocabulary -> token id
             draft_tokens = self.draft_ids[draft_tokens]
         return token_ids, draft_tokens.tolist()
+
+    def use_prefill_graph(self, seqs: list[Sequence], num_tokens: int):
+        # short prefills only, and none that saves a state snapshot (those need the chunked FLA path)
+        return (self.prefill_graphs and num_tokens <= self.prefill_graph_tokens[-1] and len(seqs) <= self.prefill_graph_seqs[-1]
+                and all(seq.block_table and not seq.snapshot_saves for seq in seqs))
+
+    @torch.inference_mode()
+    def run_prefill_graph(self, seqs: list[Sequence], input_ids: torch.Tensor, positions: torch.Tensor):
+        # pad the step to the next captured (tokens, sequences) bucket: padding rows write no KV (slot -1) and belong to
+        # no sequence; padding sequences have length 0 and the spare state slot. The step's own context stays set for
+        # compute_logits and MTP.
+        context = get_context()
+        n, bs = input_ids.size(0), len(seqs)
+        tb = next(t for t in self.prefill_graph_tokens if t >= n)
+        sb = next(b for b in self.prefill_graph_seqs if b >= bs)
+        v = self.prefill_graph_vars
+        v["input_ids"][:n] = input_ids
+        v["positions"][:n] = positions
+        v["slot_mapping"][n:tb] = -1
+        v["slot_mapping"][:n] = context.slot_mapping
+        v["cu_seqlens_q"][:bs + 1] = context.cu_seqlens_q
+        v["cu_seqlens_q"][bs + 1:sb + 1] = n
+        v["cu_seqlens_k"][:bs + 1] = context.cu_seqlens_k
+        v["cu_seqlens_k"][bs + 1:sb + 1] = sum(seq.num_cached_tokens + seq.num_scheduled_tokens for seq in seqs)
+        block_tables = context.block_tables if context.block_tables is not None else self.prepare_block_tables(seqs)
+        v["block_tables"][:bs, :block_tables.size(1)] = block_tables
+        if self.linear_attn_layers:
+            v["state_slots"][:bs] = context.state_slots
+            v["state_slots"][bs:sb] = self.spare_state_slot
+            v["has_initial_state"][:bs] = context.has_initial_state
+            v["has_initial_state"][bs:sb] = 0
+        self.prefill_graphs[(tb, sb)].replay()
+        return v["outputs"][:n]
+
+    @torch.inference_mode()
+    def capture_prefill_graphs(self):
+        # one graph per (token bucket, sequence bucket), sharing the decode graphs' memory pool; attention always reads
+        # K/V through the block table (the step's new K/V is stored first), linear attention runs the fused recurrent
+        # kernel (see LinearAttention.chunk_gated_delta_rule)
+        config = self.config
+        max_tokens = min(config.prefill_graph_tokens, config.max_num_batched_tokens)
+        self.prefill_graph_tokens = [t for t in (16, 32, 64, 128, 256, 512, 1024, 2048) if t < max_tokens] + [max_tokens]
+        max_seqs = min(16, config.max_num_seqs)
+        self.prefill_graph_seqs = [b for b in (1, 2, 4, 8) if b < max_seqs] + [max_seqs]
+        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+        self.spare_state_slot = config.num_state_groups * self.query_len
+        v = dict(
+            input_ids=torch.zeros(max_tokens, dtype=torch.int64),
+            positions=torch.zeros(max_tokens, dtype=torch.int64),
+            slot_mapping=torch.full((max_tokens,), -1, dtype=torch.int32),
+            cu_seqlens_q=torch.zeros(max_seqs + 1, dtype=torch.int32),
+            cu_seqlens_k=torch.zeros(max_seqs + 1, dtype=torch.int32),
+            block_tables=torch.zeros(max_seqs, max_num_blocks, dtype=torch.int32),
+            state_slots=torch.full((max_seqs,), self.spare_state_slot, dtype=torch.int32) if self.linear_attn_layers else None,
+            has_initial_state=torch.zeros(max_seqs, dtype=torch.int32) if self.linear_attn_layers else None,
+            outputs=torch.zeros(max_tokens, config.hf_config.hidden_size),
+        )
+        for tb in reversed(self.prefill_graph_tokens):
+            for sb in reversed(self.prefill_graph_seqs):
+                if sb > tb:
+                    continue
+                # every sequence has length 0 while capturing: the warmup run touches no KV and only the spare state
+                set_context(True, v["cu_seqlens_q"][:sb + 1], v["cu_seqlens_k"][:sb + 1], tb, config.max_model_len,
+                            v["slot_mapping"][:tb], None, v["block_tables"][:sb],
+                            v["state_slots"][:sb] if self.linear_attn_layers else None,
+                            v["has_initial_state"][:sb] if self.linear_attn_layers else None, recurrent_prefill=True)
+                graph = torch.cuda.CUDAGraph()
+                v["outputs"][:tb] = self.model(v["input_ids"][:tb], v["positions"][:tb])    # warmup
+                with torch.cuda.graph(graph, self.graph_pool):
+                    v["outputs"][:tb] = self.model(v["input_ids"][:tb], v["positions"][:tb])    # capture
+                self.prefill_graphs[(tb, sb)] = graph
+                torch.cuda.synchronize()
+                reset_context()
+        self.prefill_graph_vars = v
 
     @torch.inference_mode()
     def capture_cudagraph(self):

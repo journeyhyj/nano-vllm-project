@@ -30,12 +30,18 @@ class Config:
     # Models without linear attention cache every full block whenever the policy is not "off".
     prefix_cache_policy: str = "branch"
     num_state_snapshots: int = -1    # hybrid models: size of the snapshot pool (-1: up to 64, at most 25% of free memory)
+    # prefill steps of at most this many tokens (and at most 16 sequences) replay a CUDA graph instead of launching
+    # every kernel from Python: short prefills are host-bound. Inside the graph the linear attention layers use the
+    # fused recurrent kernel, which walks a sequence token by token, so past ~1K tokens of one sequence the eager chunked
+    # kernel wins again (Qwen3.5-4B, RTX 4090). 0 turns this off; ignored with enforce_eager
+    prefill_graph_tokens: int = 1024
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert self.prefix_cache_policy in ("off", "kv_only", "last", "branch", "all")
         assert 1 <= self.tensor_parallel_size <= 8
+        assert self.prefill_graph_tokens >= 0
         assert self.num_speculative_tokens in (0, 1), "only one MTP draft token per step is supported"
         assert self.draft_vocab is None or self.num_speculative_tokens > 0
         self.hf_config = AutoConfig.from_pretrained(self.model)
