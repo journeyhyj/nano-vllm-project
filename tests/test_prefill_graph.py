@@ -87,16 +87,19 @@ def main():
         eager, _ = probe.run(llm, prompts, graph=False)
         compare(name, eager, graph, expect_graph, used)
 
-    # single sequences across the buckets (16 ... 512), and one past the largest bucket
-    for n in (1, 5, 16, 17, 63, 64, 65, 200, 511, 512):
+    # single sequences across the buckets, up to the largest one, and one past it
+    cap = mr.prefill_graph_tokens[-1]
+    for n in sorted({1, 5, 16, 17, 63, 64, 65, 200, 511, 512, 513, cap - 1, cap}):
         check(f"one sequence, {n} tokens", [fresh(n)])
-    check("one sequence, 513 tokens (eager)", [fresh(513)], expect_graph=False)
+    check(f"one sequence, {cap + 1} tokens (eager)", [fresh(cap + 1)], expect_graph=False)
     # batches
     check("3 sequences: 3 + 70 + 250 tokens", [fresh(3), fresh(70), fresh(250)])
     check("16 sequences x 20 tokens", [fresh(20) for _ in range(16)])
     check("16 sequences x 32 tokens (512)", [fresh(32) for _ in range(16)])
+    check(f"16 sequences x {cap // 16} tokens ({cap})", [fresh(cap // 16) for _ in range(16)])
     check("17 sequences x 10 tokens (eager)", [fresh(10) for _ in range(17)], expect_graph=False)
-    # chunked prefill: 2300 tokens = a 2048-token chunk (eager) and a 252-token chunk with initial state (graph)
+    # chunked prefill (max_num_batched_tokens=2048): 2300 tokens = a 2048-token chunk (eager) and a 252-token chunk with
+    # initial state (graph)
     check("chunked prefill: 2048 eager + 252 graph", [fresh(2300)])
     # prefix-cache hit: the second request saves a snapshot at the shared boundary (eager), the third hits it and
     # prefills only its tail through the graph

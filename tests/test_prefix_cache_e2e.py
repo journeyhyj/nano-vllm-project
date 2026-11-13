@@ -7,8 +7,15 @@
 #   preempt     4 requests on a seen prefix with 600-token answers while all but 8 free KV blocks are held back:
 #               requests get preempted after a cache hit and re-admitted (hitting again)
 #   long        a 3000-token prompt, chunked by max_num_batched_tokens=2048, then a request sharing 2600 tokens of it
-# Configurations: off (reference) vs branch / last / all / kv_only, with CUDA graphs; off vs branch with MTP (k=1) and with
-# enforce_eager. Noise floor: off again, every request submitted alone (other batch shapes, same arithmetic otherwise).
+# Configurations: off (reference) vs branch / last / all / kv_only, with decode CUDA graphs and eager prefill (the chunked
+# FLA kernel everywhere); off vs branch with MTP (k=1) and with enforce_eager. Noise floor: off again, every request
+# submitted alone (other batch shapes, same arithmetic otherwise).
+# With prefill CUDA graphs (the engine default, prefill_graph_tokens): prefills of up to 1024 tokens run the fused
+# recurrent kernel instead of the chunked one. off_graph vs off measures what mixing the two kernels alone changes;
+# branch_graph / last_graph / all_graph are compared against off_graph. The fused recurrent kernel is the more exact of
+# the two (against a float64 recurrence: output error 1.7e-3 vs 4.5e-3, final-state error 3e-7 vs 3.4e-3), but a cache
+# hit changes which tokens each kernel sees, so these pairs get a logit bound of 2.0 instead of 1.0; the divergence rule
+# (only at bf16 near-ties) is the same.
 # Sampling is argmax (also for MTP verification) and FLA autotuning is pinned, so differences come only from the cache.
 # For every request: identical tokens or not, the first differing position and the reference's top-1 / top-2 logit gap
 # there (recorded at every position), and the largest |logit difference| up to it (full logits kept for the first 32).
@@ -25,18 +32,25 @@ MODEL = os.path.expanduser(os.environ.get("MODEL", "~/huggingface/Qwen3.5-4B"))
 QUESTIONS = "/data/csd/nano-vllm-data/mt_bench_question.jsonl"
 DOCS = ["/usr/share/common-licenses/GPL-3", "/usr/share/common-licenses/GFDL-1.3"]
 NUM_LOGITS = 32
+EAGER_PREFILL = dict(prefill_graph_tokens=0)
 CONFIGS = {    # name: (engine options, reference, submit requests one by one)
-    "off": (dict(prefix_cache_policy="off"), None, False),
-    "noise": (dict(prefix_cache_policy="off"), "off", True),
-    "branch": (dict(prefix_cache_policy="branch"), "off", False),
-    "last": (dict(prefix_cache_policy="last"), "off", False),
-    "all": (dict(prefix_cache_policy="all"), "off", False),
-    "kv_only": (dict(prefix_cache_policy="kv_only"), "off", False),
-    "off_mtp": (dict(prefix_cache_policy="off", num_speculative_tokens=1), None, False),
-    "branch_mtp": (dict(prefix_cache_policy="branch", num_speculative_tokens=1), "off_mtp", False),
+    "off": (dict(prefix_cache_policy="off", **EAGER_PREFILL), None, False),
+    "noise": (dict(prefix_cache_policy="off", **EAGER_PREFILL), "off", True),
+    "branch": (dict(prefix_cache_policy="branch", **EAGER_PREFILL), "off", False),
+    "last": (dict(prefix_cache_policy="last", **EAGER_PREFILL), "off", False),
+    "all": (dict(prefix_cache_policy="all", **EAGER_PREFILL), "off", False),
+    "kv_only": (dict(prefix_cache_policy="kv_only", **EAGER_PREFILL), "off", False),
+    "off_mtp": (dict(prefix_cache_policy="off", num_speculative_tokens=1, **EAGER_PREFILL), None, False),
+    "branch_mtp": (dict(prefix_cache_policy="branch", num_speculative_tokens=1, **EAGER_PREFILL), "off_mtp", False),
     "off_eager": (dict(prefix_cache_policy="off", enforce_eager=True), None, False),
     "branch_eager": (dict(prefix_cache_policy="branch", enforce_eager=True), "off_eager", False),
+    # prefill CUDA graphs (engine default)
+    "off_graph": (dict(prefix_cache_policy="off"), "off", False),
+    "branch_graph": (dict(prefix_cache_policy="branch"), "off_graph", False),
+    "last_graph": (dict(prefix_cache_policy="last"), "off_graph", False),
+    "all_graph": (dict(prefix_cache_policy="all"), "off_graph", False),
 }
+LOGIT_BOUND = {name: 2.0 for name in ("off_graph", "branch_graph", "last_graph", "all_graph")}
 
 
 def build_scenarios(tokenizer):
@@ -195,6 +209,7 @@ def main():
     hits_expected = {"branch": {"C", "D", "F3", "T2"}, "last": {"F2", "F3", "T2"},
                      "all": {"B", "C", "D", "F2", "F3", "T2", "L2", "P1", "P2", "P3", "P4"},
                      "branch_mtp": {"C", "D", "F3", "T2"}, "branch_eager": {"C", "D", "F3", "T2"}}
+    hits_expected.update({f"{p}_graph": hits_expected[p] for p in ("branch", "last", "all")})
     noise = results["noise"]["comparison"]
     print(f"{'config':13s} {'identical':>9s} {'max|dlogit|':>11s}  hits (cached tokens at admission) / divergences")
     for name, res in results.items():
@@ -214,14 +229,14 @@ def main():
             failures.append("kv_only must not skip any prefill")
         for rname, r in cmp_rows.items():
             # a cache hit may only change bf16 rounding: outputs may part at a near tie, never at a clear decision
-            if r["max_logit_diff"] > 1.0:
+            if r["max_logit_diff"] > LOGIT_BOUND.get(name, 1.0):
                 failures.append(f"{name}/{rname}: logits differ by {r['max_logit_diff']:.3f}")
             if not r["identical"] and (r["top2_gap"] is None or r["top2_gap"] > 0.5):
                 failures.append(f"{name}/{rname}: diverged at {r['first_diff']} where the top-2 gap is {r['top2_gap']:.3f}")
     preempts = {name: (res["scenarios"]["preempt"]["preemptions"], res["scenarios"]["preempt"]["hit_then_preempted"])
                 for name, res in results.items()}
     print(f"preempt scenario (preemptions, requests preempted after a cache hit): {preempts}")
-    for name in ("branch", "all", "branch_mtp"):
+    for name in ("branch", "all", "branch_mtp", "branch_graph", "all_graph"):
         if not preempts[name][1]:
             failures.append(f"{name}: no request was preempted after a cache hit")
     json.dump({k: {kk: vv for kk, vv in v.items() if kk not in ("logits", "gaps")} for k, v in results.items()},
