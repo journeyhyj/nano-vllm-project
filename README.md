@@ -166,6 +166,7 @@ Qwen3.5-4B 共 32 层，其中 24 层是 Gated DeltaNet，8 层是全注意力�
 - **换 kernel**：FLA chunk kernel 的网格由 CPU 按序列长度算出，补齐后也会变，无法回放；Graph 里改用 fused recurrent kernel，网格只取决于序列条数。
 - **不走 Graph 的情况**：超过上限、超过 16 条序列，或这一步要保存 prefix cache 的状态快照。
 - **代价**：启动多约 10 s，显存多 176 MiB，KV block 数不变。
+- **正确性**：同一请求走 Graph 和走 eager，第一个 token 的 logits 最大差 0.80（Qwen3.5-4B，含 MTP 时 0.72，Qwen3-0.6B 0.33），一条序列 decode 时另一条序列的 prefill 走哪条路径，不改变前者的输出。端到端测试中，开 Graph 时 cache 开 / 关的 logits 最大差（0.94–1.63）不超过只把短 prefill 换成 Graph 时的 1.69；对 float64 参照，Graph 里用的 fused recurrent kernel 误差更小。
 
 ## 使用
 

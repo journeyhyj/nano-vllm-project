@@ -78,7 +78,7 @@
 | `profile_prefill/before.log`、`after.log`（及同名目录里的 JSON 和 profiler trace） | 524d5de，`FLA_INTRACARD_CP=1`（修复前的行为）/ 默认 | `benchmarks/profile_prefill.py` 实验 A–E |
 | `profile_prefill/find_syncs_intracard_{1,0}.log` | 524d5de（`PYTHONPATH=/data/csd/nano-vllm-fix`） | `benchmarks/find_prefill_syncs.py`：前向里的同步次数与位置。在 GPU 4 上运行（不计时） |
 | `profile_prefill/exploration/` | 0833ed6 / 524d5de | 定位过程中的探索性运行（含 `FLA_INTRACARD_CP` 开 / 关时 2K–32K token 的长 prompt 对比）。`first_profile_intracard_on.log` 的实验 E 因脚本缺陷在采样处崩溃，D 中的 "GPU busy" 计算有误，均已在后来的脚本中修正 |
-| `prefill_fix/correctness/` | 524d5de | 修复一之后的单测与端到端测试；端到端 summary 与修复前逐字节相同 |
+| `prefill_fix/correctness/` | 524d5de | 修复一之后的单测与端到端测试；端到端 summary 与修复前的 `correctness/test_prefix_cache_e2e_v2_summary.json` 逐字节相同（md5 68f51c77ee99efe2939acf73d14bf89e），为节省空间没有重复保存 |
 | `prefill_fix/throughput_no_warmup_round/` | 524d5de | 第一次满载吞吐测量，没有不计时的预热轮（C=16、32 的第一轮含约 3 s 的一次性编译），已被 `prefill_graph/throughput/fix_*` 取代 |
 | `prefill_graph/latency/{graph,eager}.log` | d7e9967（`/data/csd/nano-vllm-g1`） | 同一引擎 prefill Graph 开 / 关时的 prefill 延迟 |
 | `prefill_graph/latency/graph_cap2048.log` | 同上 | 上限设为 2048 时的延迟，用来选择上限 1024 |

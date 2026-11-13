@@ -1,0 +1,312 @@
+{
+ "model": "Qwen3.5-4B",
+ "gpu": "NVIDIA GeForce RTX 4090",
+ "cuda_visible_devices": "0",
+ "torch": "2.6.0+cu124",
+ "nanovllm_path": "/data/csd/nano-vllm/nanovllm",
+ "loadavg_before": [
+  1.63232421875,
+  1.3095703125,
+  1.0400390625
+ ],
+ "engine": {
+  "max_model_len": 8192,
+  "max_num_seqs": 16,
+  "gpu_memory_utilization": 0.85,
+  "prefix_cache_policy": "off"
+ },
+ "git": "524d5de",
+ "git_dirty": false,
+ "A_generate_ms_by_len": {
+  "16": 90.54028615355492,
+  "64": 91.01596381515265,
+  "256": 91.10433980822563,
+  "1024": 91.94982191547751,
+  "2048": 114.49205805547535,
+  "4096": 233.39549195952713
+ },
+ "B_phases_ms": {
+  "64": {
+   "schedule": 0.02539786510169506,
+   "prepare_prefill (inputs, FLA window plan, H2D)": 0.2958928234875202,
+   "prepare_sample": 0.03901403397321701,
+   "model forward: issue (until the call returns)": 88.60403904691339,
+   "model forward: wait for the GPU afterwards": 0.02726796083152294,
+   "compute_logits (final norm excluded, lm_head)": 1.4557838439941406,
+   "sampler": 0.3638800699263811,
+   "postprocess": 0.02395687624812126,
+   "engine step (total)": 91.01651096716523,
+   "generate call (total)": 91.13593399524689
+  },
+  "2048": {
+   "schedule": 0.036264071241021156,
+   "prepare_prefill (inputs, FLA window plan, H2D)": 0.7556078489869833,
+   "prepare_sample": 0.04346692003309727,
+   "model forward: issue (until the call returns)": 88.77546712756157,
+   "model forward: wait for the GPU afterwards": 23.0821690056473,
+   "compute_logits (final norm excluded, lm_head)": 1.467547845095396,
+   "sampler": 0.3667359706014395,
+   "postprocess": 0.02856506034731865,
+   "engine step (total)": 114.84112683683634,
+   "generate call (total)": 114.95942110195756
+  }
+ },
+ "C_host_ms_by_part": {
+  "64": {
+   "embedding": 0.04985998384654522,
+   "GDN: norms": 7.239347789436579,
+   "GDN: our Triton kernels (conv1d + conv state)": 4.391172667965293,
+   "GDN: FLA chunk_gated_delta_rule call": 36.484587704762816,
+   "GDN: mixer: conv + recurrence": 54.48453058488667,
+   "GDN: mixer": 67.93695199303329,
+   "GDN: MLP": 5.757474107667804,
+   "GDN layers": 82.01737562194467,
+   "attention: norms": 2.4794323835521936,
+   "attention: mixer: flash-attn + KV store": 2.0316129084676504,
+   "attention: mixer": 8.732471382245421,
+   "attention: MLP": 1.9347479101270437,
+   "attention layers": 13.675006804987788,
+   "final norm": 0.14718296006321907
+  },
+  "2048": {
+   "embedding": 0.051418086513876915,
+   "GDN: norms": 7.212139433249831,
+   "GDN: our Triton kernels (conv1d + conv state)": 4.380200058221817,
+   "GDN: FLA chunk_gated_delta_rule call": 36.98817640542984,
+   "GDN: mixer: conv + recurrence": 54.83128665946424,
+   "GDN: mixer": 68.40508175082505,
+   "GDN: MLP": 5.647187354043126,
+   "GDN layers": 82.35460403375328,
+   "attention: norms": 2.4846165906637907,
+   "attention: mixer: flash-attn + KV store": 2.039297018200159,
+   "attention: mixer": 8.694973308593035,
+   "attention: MLP": 1.891671447083354,
+   "attention layers": 13.443375704810023,
+   "final norm": 0.14860089868307114
+  }
+ },
+ "D_profile": {
+  "64": {
+   "step_wall_ms": 138.839415,
+   "gpu_busy_ms": 13.139013999999971,
+   "device_events": 1302,
+   "kernel_launches": 1202,
+   "launch_api_calls": {
+    "cudaLaunchKernel": 716,
+    "cuLaunchKernel": 486
+   },
+   "launches_per_innermost_part": {
+    "GDN: mixer": 384,
+    "GDN: FLA chunk_gated_delta_rule call": 254,
+    "GDN: mixer: conv + recurrence": 192,
+    "attention: mixer": 104,
+    "GDN: MLP": 96,
+    "GDN: norms": 48,
+    "GDN: our Triton kernels (conv1d + conv state)": 48,
+    "attention: MLP": 32,
+    "attention: norms": 16,
+    "attention: mixer: flash-attn + KV store": 16,
+    "prefill step": 10,
+    "embedding": 1,
+    "final norm": 1
+   },
+   "top_kernels_by_gpu_ms": [
+    {
+     "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s1681",
+     "count": 40,
+     "gpu_ms": 4.54
+    },
+    {
+     "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+     "count": 64,
+     "gpu_ms": 2.616
+    },
+    {
+     "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_tn",
+     "count": 24,
+     "gpu_ms": 1.916
+    },
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, floa",
+     "count": 1,
+     "gpu_ms": 1.331
+    },
+    {
+     "name": "merge_16x16_to_64x64_inverse_kernel",
+     "count": 24,
+     "gpu_ms": 0.286
+    },
+    {
+     "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::T",
+     "count": 88,
+     "gpu_ms": 0.168
+    },
+    {
+     "name": "triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_0",
+     "count": 73,
+     "gpu_ms": 0.158
+    },
+    {
+     "name": "chunk_fwd_kernel_o",
+     "count": 24,
+     "gpu_ms": 0.142
+    },
+    {
+     "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, true, false, false>(",
+     "count": 88,
+     "gpu_ms": 0.129
+    },
+    {
+     "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native:",
+     "count": 24,
+     "gpu_ms": 0.122
+    },
+    {
+     "name": "triton_red_fused__softmax__to_copy_argmax_clamp_min_div_exponential_4",
+     "count": 1,
+     "gpu_ms": 0.12
+    },
+    {
+     "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIt",
+     "count": 48,
+     "gpu_ms": 0.117
+    },
+    {
+     "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+     "count": 24,
+     "gpu_ms": 0.117
+    },
+    {
+     "name": "recompute_w_u_fwd_kernel",
+     "count": 24,
+     "gpu_ms": 0.116
+    },
+    {
+     "name": "chunk_scaled_dot_kkt_fwd_kernel",
+     "count": 24,
+     "gpu_ms": 0.095
+    }
+   ],
+   "top_cpu_ops_table": "-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \n                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  \n-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \n                            ChunkGatedDeltaRuleFunction        25.78%      35.792ms        30.21%      41.951ms       1.748ms     849.454us         6.47%     923.791us      38.491us            24  \n                          GDN: mixer: conv + recurrence         6.11%       8.486ms        48.62%      67.508ms       2.813ms       0.000us         0.00%       1.476ms      61.489us            24  \n                                             GDN: mixer         5.32%       7.392ms        63.55%      88.237ms       3.677ms       0.000us         0.00%       4.560ms     189.980us            24  \n          GDN: our Triton kernels (conv1d + conv state)         4.50%       6.250ms         4.85%       6.733ms     140.267us       0.000us         0.00%       5.918us       0.123us            48  \n                             Torch-Compiled Region: 2/2         4.14%       5.749ms         5.88%       8.161ms     127.513us       0.000us         0.00%     143.931us       2.249us            64  \n                                       cudaLaunchKernel         3.85%       5.340ms         3.85%       5.340ms       7.458us       0.000us         0.00%       0.000us       0.000us           716  \n                                         cuLaunchKernel         3.53%       4.903ms         3.53%       4.903ms      10.088us       5.918us         0.05%       5.918us       0.012us           486  \n                                               aten::mm         3.52%       4.884ms         5.26%       7.296ms      47.689us      10.618ms        80.81%      10.618ms      69.399us           153  \n                               TorchDynamo Cache Lookup         3.08%       4.277ms         3.08%       4.277ms      29.297us       0.000us         0.00%       0.000us       0.000us           146  \n                                           prefill step         2.89%       4.014ms       100.00%     138.839ms     138.839ms       0.000us         0.00%      13.027ms      13.027ms             1  \n                                             GDN layers         2.62%       3.631ms        80.82%     112.217ms       4.676ms       0.000us         0.00%       9.152ms     381.335us            24  \n                                             GDN: norms         2.61%       3.617ms         8.05%      11.174ms     232.798us       0.000us         0.00%     108.444us       2.259us            48  \n                                               GDN: MLP         2.05%       2.843ms         6.61%       9.175ms     382.288us       0.000us         0.00%       4.484ms     186.836us            24  \n                             Torch-Compiled Region: 1/3         1.99%       2.770ms         2.61%       3.624ms     151.011us       0.000us         0.00%      51.744us       2.156us            24  \n                             Torch-Compiled Region: 3/3         1.90%       2.638ms         2.53%       3.510ms     109.692us       0.000us         0.00%      61.759us       1.930us            32  \n                                       attention: mixer         1.88%       2.615ms         8.94%      12.407ms       1.551ms       0.000us         0.00%     947.979us     118.497us             8  \n                   GDN: FLA chunk_gated_delta_rule call         1.81%       2.512ms        32.02%      44.463ms       1.853ms       0.000us         0.00%     923.791us      38.491us            24  \n                                    aten::empty_strided         1.69%       2.344ms         1.69%       2.344ms       6.585us       0.000us         0.00%       0.000us       0.000us           356  \n                                            aten::copy_         1.61%       2.241ms         4.17%       5.796ms      19.713us     487.313us         3.71%     487.313us       1.658us           294  \n     triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_0         1.30%       1.802ms         1.95%       2.706ms      37.064us     158.362us         1.21%     158.362us       2.169us            73  \n                                            aten::empty         1.26%       1.756ms         1.27%       1.765ms       6.002us       0.000us         0.00%       0.000us       0.000us           294  \n                                        cudaMemcpyAsync         1.25%       1.737ms         1.25%       1.737ms      28.943us       0.000us         0.00%       0.000us       0.000us            60  \n                attention: mixer: flash-attn + KV store         1.08%       1.501ms         2.07%       2.875ms     359.332us       0.000us         0.00%      57.278us       7.160us             8  \n                                       attention layers         0.86%       1.196ms        14.61%      20.288ms       2.536ms       0.000us         0.00%       2.396ms     299.505us             8  \n                                       attention: norms         0.85%       1.179ms         2.64%       3.668ms     229.267us       0.000us         0.00%      35.167us       2.198us            16  \n-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \nSelf CPU time total: 138.844ms\nSelf CUDA time total: 13.139ms\n"
+  },
+  "2048": {
+   "step_wall_ms": 140.908888,
+   "gpu_busy_ms": 110.05203000000006,
+   "device_events": 1230,
+   "kernel_launches": 1138,
+   "launch_api_calls": {
+    "cudaLaunchKernel": 692,
+    "cuLaunchKernel": 446
+   },
+   "launches_per_innermost_part": {
+    "GDN: MLP": 372,
+    "GDN: FLA chunk_gated_delta_rule call": 237,
+    "attention: MLP": 146,
+    "attention: mixer": 98,
+    "GDN: mixer": 64,
+    "GDN: mixer: conv + recurrence": 63,
+    "GDN: our Triton kernels (conv1d + conv state)": 54,
+    "GDN: norms": 48,
+    "attention: mixer: flash-attn + KV store": 34,
+    "attention: norms": 20,
+    "embedding": 1,
+    "final norm": 1
+   },
+   "top_kernels_by_gpu_ms": [
+    {
+     "name": "ampere_bf16_s1688gemm_bf16_64x128_sliced1x2_ldg8_f2f_tn",
+     "count": 64,
+     "gpu_ms": 60.108
+    },
+    {
+     "name": "ampere_bf16_s1688gemm_bf16_128x64_sliced1x2_ldg8_f2f_tn",
+     "count": 64,
+     "gpu_ms": 26.568
+    },
+    {
+     "name": "triton_poi_fused_mul_silu_0",
+     "count": 32,
+     "gpu_ms": 3.414
+    },
+    {
+     "name": "void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<256, 64, 64, 4, false, false, cutlass::bfloat16_t, Flash_kernel_tra",
+     "count": 8,
+     "gpu_ms": 2.43
+    },
+    {
+     "name": "chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+     "count": 24,
+     "gpu_ms": 2.4
+    },
+    {
+     "name": "chunk_fwd_kernel_o",
+     "count": 24,
+     "gpu_ms": 2.18
+    },
+    {
+     "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::T",
+     "count": 88,
+     "gpu_ms": 2.107
+    },
+    {
+     "name": "triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_0",
+     "count": 73,
+     "gpu_ms": 1.438
+    },
+    {
+     "name": "l2norm_fwd_kernel",
+     "count": 48,
+     "gpu_ms": 1.345
+    },
+    {
+     "name": "std::enable_if<!(false), void>::type internal::gemvx::kernel<int, int, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, floa",
+     "count": 1,
+     "gpu_ms": 1.335
+    },
+    {
+     "name": "causal_conv1d_kernel",
+     "count": 24,
+     "gpu_ms": 1.136
+    },
+    {
+     "name": "recompute_w_u_fwd_kernel",
+     "count": 24,
+     "gpu_ms": 0.856
+    },
+    {
+     "name": "merge_16x16_to_64x64_inverse_kernel",
+     "count": 24,
+     "gpu_ms": 0.816
+    },
+    {
+     "name": "triton_per_fused__to_copy_add_mean_mul_pow_rsqrt_silu_0",
+     "count": 24,
+     "gpu_ms": 0.792
+    },
+    {
+     "name": "chunk_scaled_dot_kkt_fwd_kernel",
+     "count": 24,
+     "gpu_ms": 0.453
+    }
+   ],
+   "top_cpu_ops_table": "-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \n                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  \n-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \n                            ChunkGatedDeltaRuleFunction        25.53%      35.971ms        29.83%      42.040ms       1.752ms       8.161ms         7.42%       8.332ms     347.160us            24  \n                          GDN: mixer: conv + recurrence         6.01%       8.474ms        47.74%      67.272ms       2.803ms       0.000us         0.00%      10.792ms     449.664us            24  \n                                             GDN: mixer         5.26%       7.415ms        62.46%      88.015ms       3.667ms       0.000us         0.00%      36.756ms       1.532ms            24  \n          GDN: our Triton kernels (conv1d + conv state)         4.40%       6.197ms         4.76%       6.708ms     139.755us       0.000us         0.00%       0.000us       0.000us            48  \n                             Torch-Compiled Region: 2/2         4.10%       5.778ms         5.80%       8.172ms     127.685us       0.000us         0.00%       1.360ms      21.256us            64  \n                                       cudaLaunchKernel         3.77%       5.314ms         3.77%       5.314ms       7.679us       0.000us         0.00%       0.000us       0.000us           692  \n                                               aten::mm         3.51%       4.943ms         5.06%       7.133ms      46.624us      88.379ms        80.31%      88.379ms     577.639us           153  \n                                           prefill step         3.26%       4.592ms       100.00%     140.909ms     140.909ms       0.000us         0.00%     108.792ms     108.792ms             1  \n                                         cuLaunchKernel         3.25%       4.581ms         3.25%       4.581ms      10.272us       0.000us         0.00%       0.000us       0.000us           446  \n                               TorchDynamo Cache Lookup         3.11%       4.380ms         3.11%       4.380ms      29.997us       0.000us         0.00%       0.000us       0.000us           146  \n                                             GDN layers         2.60%       3.666ms        79.36%     111.823ms       4.659ms       0.000us         0.00%      81.622ms       3.401ms            24  \n                                        cudaMemcpyAsync         2.53%       3.565ms         2.53%       3.565ms      59.421us       0.000us         0.00%       0.000us       0.000us            60  \n                                             GDN: norms         2.52%       3.552ms         7.91%      11.150ms     232.287us       0.000us         0.00%     941.574us      19.616us            48  \n                                               GDN: MLP         2.00%       2.813ms         6.38%       8.993ms     374.719us       0.000us         0.00%      43.924ms       1.830ms            24  \n                             Torch-Compiled Region: 1/3         1.97%       2.770ms         2.57%       3.622ms     150.926us       0.000us         0.00%     792.111us      33.005us            24  \n                             Torch-Compiled Region: 3/3         1.85%       2.610ms         2.47%       3.476ms     108.631us       0.000us         0.00%       3.414ms     106.675us            32  \n                                       attention: mixer         1.85%       2.602ms         8.80%      12.399ms       1.550ms       0.000us         0.00%      10.612ms       1.327ms             8  \n                   GDN: FLA chunk_gated_delta_rule call         1.78%       2.511ms        31.62%      44.551ms       1.856ms       0.000us         0.00%       8.332ms     347.160us            24  \n                                    aten::empty_strided         1.68%       2.365ms         1.68%       2.365ms       6.643us       0.000us         0.00%       0.000us       0.000us           356  \n                                            aten::copy_         1.59%       2.244ms         5.38%       7.579ms      25.780us       2.805ms         2.55%       2.805ms       9.542us           294  \n     triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_0         1.27%       1.783ms         1.92%       2.701ms      37.001us       1.438ms         1.31%       1.438ms      19.698us            73  \n                                            aten::empty         1.23%       1.739ms         1.24%       1.750ms       5.953us       0.000us         0.00%       0.000us       0.000us           294  \n                attention: mixer: flash-attn + KV store         1.07%       1.513ms         2.07%       2.915ms     364.350us       0.000us         0.00%       2.430ms     303.785us             8  \n                                       attention layers         0.87%       1.231ms        14.39%      20.275ms       2.534ms       0.000us         0.00%      25.648ms       3.206ms             8  \n                             Torch-Compiled Region: 4/3         0.84%       1.179ms         1.38%       1.942ms     242.694us       0.000us         0.00%     207.131us      25.891us             8  \n-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  \nSelf CPU time total: 140.913ms\nSelf CUDA time total: 110.052ms\n"
+  }
+ },
+ "E_graph": {
+  "64": {
+   "eager_forward_ms": 97.1767040900886,
+   "graph_replay_ms": 11.788618983700871,
+   "graph_output_equals_eager": true
+  },
+  "2048": {
+   "eager_forward_ms": 112.50137188471854,
+   "graph_replay_ms": 110.16473011113703,
+   "graph_output_equals_eager": true
+  }
+ },
+ "loadavg_after": [
+  1.73046875,
+  1.3544921875,
+  1.06103515625
+ ]
+}

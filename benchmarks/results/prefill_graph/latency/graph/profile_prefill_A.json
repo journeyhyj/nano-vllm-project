@@ -1,0 +1,43 @@
+{
+ "model": "Qwen3.5-4B",
+ "gpu": "NVIDIA GeForce RTX 4090",
+ "cuda_visible_devices": "0",
+ "torch": "2.6.0+cu124",
+ "nanovllm_path": "/data/csd/nano-vllm-g1/nanovllm",
+ "loadavg_before": [
+  1.5849609375,
+  1.73291015625,
+  1.90673828125
+ ],
+ "engine": {
+  "max_model_len": 8192,
+  "max_num_seqs": 16,
+  "gpu_memory_utilization": 0.85,
+  "prefix_cache_policy": "off",
+  "prefill_graph_tokens": 1024
+ },
+ "git": "d7e9967",
+ "git_dirty": false,
+ "A_generate_ms_by_len": {
+  "1": 12.020776979625225,
+  "16": 12.187537970021367,
+  "64": 13.57594900764525,
+  "128": 15.608022920787334,
+  "256": 22.086590994149446,
+  "512": 35.93521402217448,
+  "768": 63.073641154915094,
+  "1024": 67.11858417838812,
+  "1536": 94.64960009790957,
+  "2048": 114.9071529507637,
+  "4096": 233.3012311719358
+ },
+ "B_phases_ms": {},
+ "C_host_ms_by_part": {},
+ "D_profile": {},
+ "E_graph": {},
+ "loadavg_after": [
+  1.5380859375,
+  1.720703125,
+  1.90185546875
+ ]
+}
