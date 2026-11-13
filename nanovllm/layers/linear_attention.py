@@ -1,5 +1,14 @@
 import bisect
 import math
+import os
+
+# fla-core 0.4.2 sends the varlen chunk_gated_delta_rule_fwd_h to an "intra-card context parallel" backend by default.
+# That backend is not handed the cu_seqlens_cpu we pass in, so it calls cu_seqlens.cpu(): one GPU->CPU sync per GDN
+# layer, which stops the host from running ahead of the GPU and makes the prefill impossible to capture in a CUDA
+# graph. On one RTX 4090 it does not speed up prompts of up to 32K tokens (benchmarks/results/profile_prefill/), so it
+# is off unless the environment asks for it. Must be set before fla is imported.
+os.environ.setdefault("FLA_INTRACARD_CP", "0")
+
 import torch
 from torch import nn
 import triton
